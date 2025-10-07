@@ -5,7 +5,7 @@ Additional analysis of the CPU scheduling experiment results
 
 import pandas as pd
 
-def analyze_results():
+def analyze_results() -> None:
     """Provide detailed analysis of the experiment results."""
 
     # Load results

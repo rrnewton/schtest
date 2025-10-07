@@ -13,17 +13,69 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Set, Any
+from typing import Dict, Tuple, Optional, Set, List
+from enum import Enum
+from dataclasses import dataclass
 
 # Configuration
 EXPERIMENT_DURATION = 10  # seconds
 RESULTS_DIR = Path("./results")
 STRESS_SCRIPT = "./stress.sh"
 
+# Type Definitions
+class WorkloadType(Enum):
+    """Enum for workload types"""
+    BOTH = "both"
+    CPU = "cpu"
+    MEM = "mem"
+
+class PinningStrategy(Enum):
+    """Enum for thread pinning strategies"""
+    NONE = "none"
+    SPREAD = "spread"
+    HALF = "half"
+
+class SchedulerType(Enum):
+    """Enum for scheduler types"""
+    DEFAULT = "default"
+
+@dataclass
+class StressMetrics:
+    """Typed structure for stress-ng metrics"""
+    bogo_ops: int
+    bogo_ops_per_sec_cpu_time: float
+    real_time: float
+
+@dataclass
+class PerfMetrics:
+    """Typed structure for perf metrics"""
+    instructions: float
+    cycles: float
+    cache_refs: float
+    cache_misses: float
+
+@dataclass
+class ExperimentResult:
+    """Typed structure for complete experiment results"""
+    workload: WorkloadType
+    pinning: PinningStrategy
+    scheduler: SchedulerType
+    num_cores: int
+    bogo_cpu: int
+    bogo_cpu_persec: float
+    real_time_cpu: float
+    bogo_mem: int
+    bogo_mem_persec: float
+    real_time_mem: float
+    instructions: float
+    cycles: float
+    cache_refs: float
+    cache_misses: float
+
 class ExperimentRunner:
-    def __init__(self):
+    def __init__(self) -> None:
         self.num_cores = self._get_num_cores()
-        self.results = []
+        self.results: List[ExperimentResult] = []
         self.results_dir = RESULTS_DIR
         self.results_dir.mkdir(exist_ok=True)
 
@@ -41,42 +93,42 @@ class ExperimentRunner:
                 unique_cores.add((core, socket))
         return len(unique_cores)
 
-    def _create_stress_script(self, workload: str, pinning: str) -> str:
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy) -> str:
         """Create stress.sh script for given configuration."""
         P = self.num_cores
 
         # Determine taskset arguments based on pinning strategy
-        if pinning == "none":
+        if pinning == PinningStrategy.NONE:
             cpu_taskset = ""
             mem_taskset = ""
-        elif pinning == "spread":
+        elif pinning == PinningStrategy.SPREAD:
             cpu_taskset = f"--taskset 0-{P-1}"
             mem_taskset = f"--taskset {P}-{2*P-1}"
-        elif pinning == "half":
+        elif pinning == PinningStrategy.HALF:
             cpu_taskset = "--taskset even"
             mem_taskset = "--taskset odd"
         else:
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
         # Create script content based on workload
-        if workload == "both":
+        if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning}.yaml \\
+(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning.value}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset}) &
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
-        elif workload == "cpu":
+        elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning.value}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset};
 """
-        elif workload == "mem":
+        elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         else:
@@ -84,10 +136,10 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
 
         return script_content
 
-    def _run_experiment(self, workload: str, pinning: str, scheduler: str = "default") -> Dict[str, Any]:
+    def _run_experiment(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType = SchedulerType.DEFAULT) -> ExperimentResult:
         """Run a single experiment configuration."""
         print(f"\n{'='*60}")
-        print(f"Running experiment: workload={workload}, pinning={pinning}, scheduler={scheduler}")
+        print(f"Running experiment: workload={workload.value}, pinning={pinning.value}, scheduler={scheduler.value}")
         print(f"{'='*60}")
 
         # Create and write stress script
@@ -97,7 +149,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
         os.chmod(STRESS_SCRIPT, 0o755)
 
         # Run experiment with perf
-        perf_output_file = self.results_dir / f"perf_{workload}_{pinning}_{scheduler}.json"
+        perf_output_file = self.results_dir / f"perf_{workload.value}_{pinning.value}_{scheduler.value}.json"
         perf_cmd = [
             "perf", "stat", "-j",
             "-e", "instructions,cycles,cache-references,cache-misses",
@@ -120,90 +172,83 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
             print(f"stdout: {result.stdout}")
 
         # Parse results
-        experiment_result = {
-            'workload': workload,
-            'pinning': pinning,
-            'scheduler': scheduler,
-            'num_cores': self.num_cores
-        }
+        cpu_metrics: Optional[StressMetrics] = None
+        mem_metrics: Optional[StressMetrics] = None
 
         # Parse stress-ng YAML files
-        if workload in ["both", "cpu"]:
-            cpu_metrics = self._parse_stress_yaml(f"metrics_cpu_{pinning}.yaml")
-            if cpu_metrics:
-                experiment_result.update({
-                    'bogo_cpu': cpu_metrics.get('bogo_ops', 0),
-                    'bogo_cpu_persec': cpu_metrics.get('bogo_ops_per_sec_cpu_time', 0),
-                    'real_time_cpu': cpu_metrics.get('real_time', 0),
-                })
+        if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
+            cpu_metrics = self._parse_stress_yaml(f"metrics_cpu_{pinning.value}.yaml")
 
-        if workload in ["both", "mem"]:
-            mem_metrics = self._parse_stress_yaml(f"metrics_mem_{pinning}.yaml")
-            if mem_metrics:
-                experiment_result.update({
-                    'bogo_mem': mem_metrics.get('bogo_ops', 0),
-                    'bogo_mem_persec': mem_metrics.get('bogo_ops_per_sec_cpu_time', 0),
-                    'real_time_mem': mem_metrics.get('real_time', 0),
-                })
+        if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
+            mem_metrics = self._parse_stress_yaml(f"metrics_mem_{pinning.value}.yaml")
 
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
-        experiment_result.update(perf_metrics)
 
-        # Fill missing values with 0
-        for key in ['bogo_cpu', 'bogo_cpu_persec', 'bogo_mem', 'bogo_mem_persec',
-                   'real_time_cpu', 'real_time_mem', 'instructions', 'cycles',
-                   'cache_refs', 'cache_misses']:
-            if key not in experiment_result:
-                experiment_result[key] = 0
+        # Create typed result
+        return ExperimentResult(
+            workload=workload,
+            pinning=pinning,
+            scheduler=scheduler,
+            num_cores=self.num_cores,
+            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
+            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
+            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
+            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
+            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
+            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
+            instructions=perf_metrics.instructions,
+            cycles=perf_metrics.cycles,
+            cache_refs=perf_metrics.cache_refs,
+            cache_misses=perf_metrics.cache_misses,
+        )
 
-        return experiment_result
-
-    def _parse_stress_yaml(self, yaml_file: str) -> Optional[Dict[str, Any]]:
+    def _parse_stress_yaml(self, yaml_file: str) -> Optional[StressMetrics]:
         """Parse stress-ng YAML output file."""
         if not os.path.exists(yaml_file):
-            print(f"Warning: {yaml_file} not found")
+            print(f"YAML file not found: {yaml_file}")
             return None
 
         try:
             with open(yaml_file, 'r') as f:
                 data = yaml.safe_load(f)
 
-            if not data or 'metrics' not in data:
-                print(f"Warning: No metrics found in {yaml_file}")
-                return None
-
-            metrics = data['metrics'][0]  # Assuming first metric
-            return {
-                'bogo_ops': metrics.get('bogo-ops', 0),
-                'bogo_ops_per_sec_cpu_time': metrics.get('bogo-ops-per-second-usr-sys-time', 0),
-                'real_time': metrics.get('bogo-ops-per-second-real-time', 0),
-            }
+            metrics = data.get('metrics', [{}])[0]
+            return StressMetrics(
+                bogo_ops=metrics.get('bogo-ops', 0),
+                bogo_ops_per_sec_cpu_time=metrics.get('bogo-ops-per-second-usr-sys-time', 0.0),
+                real_time=metrics.get('wall-clock-time', 0.0)
+            )
         except Exception as e:
-            print(f"Error parsing {yaml_file}: {e}")
+            print(f"Error parsing YAML file {yaml_file}: {e}")
             return None
 
-    def _parse_perf_json(self, json_file: Path) -> Dict[str, float]:
+    def _parse_perf_json(self, json_file: Path) -> PerfMetrics:
         """Parse perf stat JSON output."""
-        perf_metrics: Dict[str, float] = {
-            'instructions': 0.0,
-            'cycles': 0.0,
-            'cache_refs': 0.0,
-            'cache_misses': 0.0
-        }
+        default_metrics = PerfMetrics(
+            instructions=0,
+            cycles=0,
+            cache_refs=0,
+            cache_misses=0
+        )
 
         if not json_file.exists():
             print(f"Warning: {json_file} not found")
-            return perf_metrics
+            return default_metrics
 
         try:
             with open(json_file, 'r') as f:
                 content = f.read().strip()
                 if not content:
                     print(f"Warning: {json_file} is empty")
-                    return perf_metrics
+                    return default_metrics
 
                 # Parse line by line since perf outputs one JSON object per line
+                instructions = 0
+                cycles = 0
+                cache_refs = 0
+                cache_misses = 0
+
                 for line in content.split('\n'):
                     line = line.strip()
                     if not line:
@@ -215,25 +260,31 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
                             value = data['counter-value']
 
                             if event == 'instructions':
-                                perf_metrics['instructions'] = value
+                                instructions = value
                             elif event == 'cycles':
-                                perf_metrics['cycles'] = value
+                                cycles = value
                             elif event == 'cache-references':
-                                perf_metrics['cache_refs'] = value
+                                cache_refs = value
                             elif event == 'cache-misses':
-                                perf_metrics['cache_misses'] = value
+                                cache_misses = value
                     except json.JSONDecodeError:
                         continue  # Skip non-JSON lines
 
+                return PerfMetrics(
+                    instructions=instructions,
+                    cycles=cycles,
+                    cache_refs=cache_refs,
+                    cache_misses=cache_misses
+                )
+
         except Exception as e:
             print(f"Error parsing {json_file}: {e}")
+            return default_metrics
 
-        return perf_metrics
-
-    def run_all_experiments(self):
+    def run_all_experiments(self) -> None:
         """Run all experiment combinations."""
-        workloads = ["both", "cpu", "mem"]
-        pinning_strategies = ["none", "spread", "half"]
+        workloads = [WorkloadType.BOTH, WorkloadType.CPU, WorkloadType.MEM]
+        pinning_strategies = [PinningStrategy.NONE, PinningStrategy.SPREAD, PinningStrategy.HALF]
 
         total_experiments = len(workloads) * len(pinning_strategies)
         current_exp = 0
@@ -253,20 +304,62 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
         print("All experiments completed!")
         print(f"{'='*60}")
 
-    def _save_results(self):
+    def _save_results(self) -> None:
         """Save results to CSV file."""
-        df = pd.DataFrame(self.results)
+        # Convert dataclasses to dictionaries with string enum values for CSV
+        results_dicts = []
+        for result in self.results:
+            result_dict = {
+                'workload': result.workload.value,
+                'pinning': result.pinning.value,
+                'scheduler': result.scheduler.value,
+                'num_cores': result.num_cores,
+                'bogo_cpu': result.bogo_cpu,
+                'bogo_cpu_persec': result.bogo_cpu_persec,
+                'real_time_cpu': result.real_time_cpu,
+                'bogo_mem': result.bogo_mem,
+                'bogo_mem_persec': result.bogo_mem_persec,
+                'real_time_mem': result.real_time_mem,
+                'instructions': result.instructions,
+                'cycles': result.cycles,
+                'cache_refs': result.cache_refs,
+                'cache_misses': result.cache_misses
+            }
+            results_dicts.append(result_dict)
+
+        df = pd.DataFrame(results_dicts)
         csv_file = self.results_dir / "experiment_results.csv"
         df.to_csv(csv_file, index=False)
         print(f"Results saved to {csv_file}")
 
-    def analyze_and_plot(self):
+    def analyze_and_plot(self) -> None:
         """Analyze results and create visualization."""
         if not self.results:
             print("No results to analyze!")
             return
 
-        df = pd.DataFrame(self.results)
+        # Convert dataclasses to dictionaries for analysis
+        results_dicts = []
+        for result in self.results:
+            result_dict = {
+                'workload': result.workload.value,
+                'pinning': result.pinning.value,
+                'scheduler': result.scheduler.value,
+                'num_cores': result.num_cores,
+                'bogo_cpu': result.bogo_cpu,
+                'bogo_cpu_persec': result.bogo_cpu_persec,
+                'real_time_cpu': result.real_time_cpu,
+                'bogo_mem': result.bogo_mem,
+                'bogo_mem_persec': result.bogo_mem_persec,
+                'real_time_mem': result.real_time_mem,
+                'instructions': result.instructions,
+                'cycles': result.cycles,
+                'cache_refs': result.cache_refs,
+                'cache_misses': result.cache_misses
+            }
+            results_dicts.append(result_dict)
+
+        df = pd.DataFrame(results_dicts)
 
         # Calculate normalization factors (best performance = 100%)
         max_cpu_persec = df['bogo_cpu_persec'].max()
@@ -289,7 +382,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
         summary_cols = ['workload', 'pinning', 'cpu_normalized', 'mem_normalized', 'combined_tput']
         print(df[summary_cols].round(1).to_string(index=False))
 
-    def _create_plots(self, df: pd.DataFrame, max_cpu_persec: float, max_mem_persec: float):
+    def _create_plots(self, df: pd.DataFrame, max_cpu_persec: float, max_mem_persec: float) -> None:
         """Create stacked bar chart visualization."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
         fig.suptitle(f'CPU Scheduling Experiment Results\n'
@@ -380,7 +473,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning}.yaml \
         print(f"Plot saved to {plot_file}")
         plt.show()
 
-def main():
+def main() -> None:
     """Main experiment execution."""
     print("CPU Scheduling Experiment")
     print("=" * 40)
