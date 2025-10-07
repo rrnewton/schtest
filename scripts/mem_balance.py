@@ -13,7 +13,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Set, List
+from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
 from dataclasses import dataclass
 
@@ -307,9 +307,9 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
     def _save_results(self) -> None:
         """Save results to CSV file."""
         # Convert dataclasses to dictionaries with string enum values for CSV
-        results_dicts = []
+        results_dicts: List[Dict[str, Any]] = []
         for result in self.results:
-            result_dict = {
+            result_dict: Dict[str, Any] = {
                 'workload': result.workload.value,
                 'pinning': result.pinning.value,
                 'scheduler': result.scheduler.value,
@@ -339,9 +339,9 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
             return
 
         # Convert dataclasses to dictionaries for analysis
-        results_dicts = []
+        results_dicts: List[Dict[str, Any]] = []
         for result in self.results:
-            result_dict = {
+            result_dict: Dict[str, Any] = {
                 'workload': result.workload.value,
                 'pinning': result.pinning.value,
                 'scheduler': result.scheduler.value,
@@ -399,17 +399,17 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
         for i, pinning in enumerate(pinning_strategies):
             subset = df[df['pinning'] == pinning]
 
-            cpu_values = []
-            mem_values = []
+            cpu_values: List[float] = []
+            mem_values: List[float] = []
 
             for workload in workloads:
                 row = subset[subset['workload'] == workload]
                 if len(row) > 0:
-                    cpu_values.append(row['cpu_normalized'].iloc[0])
-                    mem_values.append(row['mem_normalized'].iloc[0])
+                    cpu_values.append(float(row['cpu_normalized'].iloc[0]))
+                    mem_values.append(float(row['mem_normalized'].iloc[0]))
                 else:
-                    cpu_values.append(0)
-                    mem_values.append(0)
+                    cpu_values.append(0.0)
+                    mem_values.append(0.0)
 
             # Create stacked bars
             x_offset = x_pos + i * width
@@ -430,22 +430,22 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
         ax1.set_ylim(0, 220)
 
         # Plot 2: Combined throughput comparison
-        combined_data = []
-        labels = []
-        colors = []
+        combined_data: List[float] = []
+        labels: List[str] = []
+        colors: List[str] = []
 
         color_map = {'none': 'red', 'spread': 'green', 'half': 'blue'}
 
         for workload in workloads:
-            workload_data = []
+            workload_data: List[float] = []
             for pinning in pinning_strategies:
                 subset = df[(df['workload'] == workload) & (df['pinning'] == pinning)]
                 if len(subset) > 0:
-                    workload_data.append(subset['combined_tput'].iloc[0])
+                    workload_data.append(float(subset['combined_tput'].iloc[0]))
                     labels.append(f'{workload}\n{pinning}')
                     colors.append(color_map[pinning])
                 else:
-                    workload_data.append(0)
+                    workload_data.append(0.0)
             combined_data.extend(workload_data)
 
         x_pos2 = np.arange(len(labels))

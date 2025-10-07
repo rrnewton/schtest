@@ -2,7 +2,7 @@
 # ===================================
 
 # Configuration
-PYTHON := /home/newton/work/rrn_scx_playground/schtest/.venv/bin/python
+PYTHON := ../.venv/bin/python
 RESULTS_DIR := results
 EXPERIMENT_SCRIPT := mem_balance.py
 ANALYSIS_SCRIPT := analyze_results.py
@@ -45,6 +45,12 @@ analyze: $(CSV_FILE) ## Run detailed analysis of existing results
 quick_test: check_deps ## Run a quick 2-second test
 	@echo "🚀 Running quick test..."
 	$(PYTHON) test_experiment.py
+
+.PHONY: typecheck
+typecheck: ## Run strict type checking on all Python files
+	@echo "🔍 Running type checking..."
+	$(PYTHON) -m mypy --strict $(EXPERIMENT_SCRIPT) $(ANALYSIS_SCRIPT) test_experiment.py
+	@echo "✅ Type checking passed!"
 
 .PHONY: check_deps
 check_deps: ## Check dependencies
