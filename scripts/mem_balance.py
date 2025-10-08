@@ -230,6 +230,14 @@ class ExperimentRunner:
         
         raise ValueError(f"Unknown scheduler: {scheduler}")
     
+    def _get_cpu_stress_params(self, num_cores: int) -> str:
+        """Get stress-ng CPU workload parameters as a function of core count."""
+        return f"--cpu {num_cores} --cpu-method int64"
+    
+    def _get_mem_stress_params(self, num_cores: int) -> str:
+        """Get stress-ng memory workload parameters as a function of core count."""
+        return f"--vm {num_cores} --vm-keep --vm-method ror --vm-bytes {num_cores}g"
+    
     def _stop_scheduler(self, proc: Optional[subprocess.Popen]) -> None:
         """Stop a scheduler process."""
         if proc is None:
@@ -268,26 +276,30 @@ class ExperimentRunner:
         # Create script content based on workload with run-specific YAML files
         cpu_yaml = run_dir / "metrics_cpu.yaml"
         mem_yaml = run_dir / "metrics_mem.yaml"
+        
+        # Get abstracted stress-ng parameters
+        cpu_params = self._get_cpu_stress_params(P)
+        mem_params = self._get_mem_stress_params(P)
 
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
 (stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
-   --cpu {P} --cpu-method int64 {cpu_taskset}) &
+   {cpu_params} {cpu_taskset}) &
 stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
-   --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
+   {mem_params} {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
 stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
-   --cpu {P} --cpu-method int64 {cpu_taskset};
+   {cpu_params} {cpu_taskset};
 """
         elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
 stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
-   --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
+   {mem_params} {mem_taskset};
 """
         else:
             raise ValueError(f"Unknown workload: {workload}")
