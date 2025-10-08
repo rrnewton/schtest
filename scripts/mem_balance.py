@@ -12,6 +12,8 @@ import yaml
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
+import re
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
@@ -73,11 +75,13 @@ class ExperimentResult:
     cache_misses: float
 
 class ExperimentRunner:
-    def __init__(self) -> None:
+    def __init__(self, machine_name: Optional[str] = None) -> None:
         self.num_cores = self._get_num_cores()
+        self.machine_name = machine_name or self._get_machine_name_from_cpuinfo()
         self.results: List[ExperimentResult] = []
-        self.results_dir = RESULTS_DIR
-        self.results_dir.mkdir(exist_ok=True)
+        # Create machine-specific results directory
+        self.results_dir = RESULTS_DIR / self.machine_name
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_num_cores(self) -> int:
         """Get number of physical cores on the system."""
@@ -93,9 +97,39 @@ class ExperimentRunner:
                 unique_cores.add((core, socket))
         return len(unique_cores)
 
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy) -> str:
+    def _get_machine_name_from_cpuinfo(self) -> str:
+        """Get machine name from /proc/cpuinfo model name."""
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if line.startswith('model name'):
+                        # Extract the model name after the colon
+                        model_name = line.split(':', 1)[1].strip()
+                        # Replace spaces and special characters with underscores
+                        machine_name = re.sub(r'[^a-zA-Z0-9]', '_', model_name)
+                        # Remove multiple consecutive underscores
+                        machine_name = re.sub(r'_+', '_', machine_name)
+                        # Remove leading/trailing underscores
+                        return machine_name.strip('_')
+        except (FileNotFoundError, IOError, IndexError):
+            pass
+        return "unknown_machine"
+
+    def _get_run_config_name(self, pinning: PinningStrategy, scheduler: SchedulerType) -> str:
+        """Generate run configuration name: pinning_scheduler (HOW we run)"""
+        return f"{pinning.value}_{scheduler.value}"
+
+    def _get_full_config_name(self, workload: WorkloadType, pinning: PinningStrategy, 
+                             scheduler: SchedulerType) -> str:
+        """Generate full configuration name: workload_pinning_scheduler (WHAT + HOW we run)"""
+        run_config = self._get_run_config_name(pinning, scheduler)
+        return f"{workload.value}_{run_config}"
+
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy, 
+                             scheduler: SchedulerType) -> str:
         """Create stress.sh script for given configuration."""
         P = self.num_cores
+        run_config = self._get_run_config_name(pinning, scheduler)
 
         # Determine taskset arguments based on pinning strategy
         if pinning == PinningStrategy.NONE:
@@ -114,21 +148,21 @@ class ExperimentRunner:
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning.value}.yaml \\
+(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{run_config}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset}) &
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{pinning.value}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{run_config}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset};
 """
         elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         else:
@@ -143,13 +177,14 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
         print(f"{'='*60}")
 
         # Create and write stress script
-        script_content = self._create_stress_script(workload, pinning)
+        script_content = self._create_stress_script(workload, pinning, scheduler)
         with open(STRESS_SCRIPT, 'w') as f:
             f.write(script_content)
         os.chmod(STRESS_SCRIPT, 0o755)
 
         # Run experiment with perf
-        perf_output_file = self.results_dir / f"perf_{workload.value}_{pinning.value}_{scheduler.value}.json"
+        full_config = self._get_full_config_name(workload, pinning, scheduler)
+        perf_output_file = self.results_dir / f"perf_{full_config}.json"
         perf_cmd = [
             "perf", "stat", "-j",
             "-e", "instructions,cycles,cache-references,cache-misses",
@@ -174,13 +209,14 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
         # Parse results
         cpu_metrics: Optional[StressMetrics] = None
         mem_metrics: Optional[StressMetrics] = None
+        run_config = self._get_run_config_name(pinning, scheduler)
 
         # Parse stress-ng YAML files
         if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_metrics = self._parse_stress_yaml(f"metrics_cpu_{pinning.value}.yaml")
+            cpu_metrics = self._parse_stress_yaml(f"metrics_cpu_{run_config}.yaml")
 
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            mem_metrics = self._parse_stress_yaml(f"metrics_mem_{pinning.value}.yaml")
+            mem_metrics = self._parse_stress_yaml(f"metrics_mem_{run_config}.yaml")
 
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
@@ -475,11 +511,18 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{pinning.value}.
 
 def main() -> None:
     """Main experiment execution."""
+    parser = argparse.ArgumentParser(description="CPU Scheduling Experiment")
+    parser.add_argument("--machine", type=str, default=None,
+                       help="Machine name tag (default: auto-detect from /proc/cpuinfo)")
+    args = parser.parse_args()
+
     print("CPU Scheduling Experiment")
     print("=" * 40)
 
-    runner = ExperimentRunner()
+    runner = ExperimentRunner(machine_name=args.machine)
+    print(f"Machine: {runner.machine_name}")
     print(f"Detected {runner.num_cores} physical cores")
+    print(f"Results directory: {runner.results_dir}")
 
     # Check dependencies
     try:

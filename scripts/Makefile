@@ -22,6 +22,11 @@ help: ## Show this help message
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Machine name options:"
+	@echo "  Direct execution:     $(PYTHON) mem_balance.py --machine=workstation"
+	@echo "  Results organized:    results/<machine_name>/"
+	@echo "  Auto-detect from:     /proc/cpuinfo model name"
+	@echo ""
 
 .PHONY: install_deps
 install_deps: ## Install Python virtual environment and dependencies from lock file

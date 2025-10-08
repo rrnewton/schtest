@@ -4,20 +4,24 @@ Quick test script to validate the approach with shorter duration
 """
 
 import sys
+import argparse
+from typing import Optional
 sys.path.insert(0, '/home/newton/playground/schtest/scripts')
 
 # Import our main script
-from mem_balance import ExperimentRunner, WorkloadType, PinningStrategy
+from mem_balance import ExperimentRunner, WorkloadType, PinningStrategy, SchedulerType
 
 # Create a test runner with shorter duration
 class TestRunner(ExperimentRunner):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, machine_name: Optional[str] = None) -> None:
+        super().__init__(machine_name=machine_name)
         # No need to reference EXPERIMENT_DURATION since we override the script generation
 
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy) -> str:
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy, 
+                             scheduler: SchedulerType) -> str:
         """Override to use shorter duration."""
         P = self.num_cores
+        run_config = self._get_run_config_name(pinning, scheduler)
 
         # Determine taskset arguments based on pinning strategy
         if pinning == PinningStrategy.NONE:
@@ -36,21 +40,21 @@ class TestRunner(ExperimentRunner):
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-(stress-ng --metrics -t 2 --yaml metrics_cpu_{pinning.value}.yaml \\
+(stress-ng --metrics -t 2 --yaml metrics_cpu_{run_config}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset}) &
-stress-ng --metrics -t 2 --yaml metrics_mem_{pinning.value}.yaml \\
+stress-ng --metrics -t 2 --yaml metrics_mem_{run_config}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t 2 --yaml metrics_cpu_{pinning.value}.yaml \\
+stress-ng --metrics -t 2 --yaml metrics_cpu_{run_config}.yaml \\
    --cpu {P} --cpu-method int64 {cpu_taskset};
 """
         elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t 2 --yaml metrics_mem_{pinning.value}.yaml \\
+stress-ng --metrics -t 2 --yaml metrics_mem_{run_config}.yaml \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         else:
@@ -59,8 +63,15 @@ stress-ng --metrics -t 2 --yaml metrics_mem_{pinning.value}.yaml \\
         return script_content
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Quick CPU Scheduling Experiment Test")
+    parser.add_argument("--machine", type=str, default=None,
+                       help="Machine name tag (default: auto-detect from /proc/cpuinfo)")
+    args = parser.parse_args()
+
     print("Running quick test with 2-second experiments...")
-    runner = TestRunner()
+    runner = TestRunner(machine_name=args.machine)
+    print(f"Machine: {runner.machine_name}")
+    print(f"Results directory: {runner.results_dir}")
 
     # Test just one configuration
     result = runner._run_experiment(WorkloadType.CPU, PinningStrategy.SPREAD)

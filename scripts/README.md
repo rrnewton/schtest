@@ -60,7 +60,27 @@ make check_deps
 
 For detailed dependency management, see [DEPENDENCIES.md](DEPENDENCIES.md).
 
-## Example Workflow
+## Usage
+
+Basic usage:
+```bash
+make full_run           # Complete experiment with auto-detected machine name
+```
+
+With custom machine name:
+```bash
+# Run experiment with custom machine tag
+../venv/bin/python mem_balance.py --machine=workstation
+
+# Quick test with custom machine name  
+../venv/bin/python test_experiment.py --machine=lab_machine
+```
+
+**Machine Name**: Results are organized by machine name under `results/<machine_name>/`. The machine name is auto-detected from `/proc/cpuinfo` (CPU model name with spaces replaced by underscores) or can be specified with `--machine=custom_name`.
+
+**Configuration Naming**: Files use the format `<workload>_<pinning>_<scheduler>` (e.g., `cpu_spread_default`).
+
+## Workflow
 
 1. **First time setup**: 
    ```bash
