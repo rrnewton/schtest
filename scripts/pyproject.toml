@@ -7,12 +7,12 @@
 typeCheckingMode = "standard"
 
 # Python environment configuration
-pythonPath = ".venv/bin/python"
-venvPath = "."
+pythonPath = "../.venv/bin/python"
+venvPath = ".."
 venv = ".venv"
 
 # Include/exclude paths
-include = ["scripts"]
+include = ["."]
 exclude = ["**/__pycache__", "**/.mypy_cache"]
 
 # # Suppress warnings about third-party library types (matplotlib, pandas, etc.)

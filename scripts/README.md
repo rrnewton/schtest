@@ -34,7 +34,7 @@ This will:
 The experiment requires:
 - **stress-ng**: CPU and memory stress testing tool
 - **perf**: Linux performance monitoring tool  
-- **Python packages**: Managed via pip-tools (see [DEPENDENCIES.md](../DEPENDENCIES.md))
+- **Python packages**: Managed via pip-tools (see [DEPENDENCIES.md](DEPENDENCIES.md))
 
 ### System Dependencies
 Install system tools:
@@ -58,7 +58,7 @@ Check all dependencies:
 make check_deps
 ```
 
-For detailed dependency management, see [DEPENDENCIES.md](../DEPENDENCIES.md).
+For detailed dependency management, see [DEPENDENCIES.md](DEPENDENCIES.md).
 
 ## Example Workflow
 

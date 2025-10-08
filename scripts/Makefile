@@ -4,8 +4,8 @@
 # Configuration
 PYTHON := ../.venv/bin/python
 VENV_DIR := ../.venv
-REQUIREMENTS_IN := ../requirements.in
-REQUIREMENTS_LOCK := ../requirements.txt
+REQUIREMENTS_IN := requirements.in
+REQUIREMENTS_LOCK := requirements.txt
 RESULTS_DIR := results
 EXPERIMENT_SCRIPT := mem_balance.py
 ANALYSIS_SCRIPT := analyze_results.py
@@ -86,7 +86,7 @@ typecheck: typecheck-vscode typecheck-mypy
 .PHONY: typecheck-vscode
 typecheck-vscode: ## Run pyright type checking (matches VS Code exactly)
 	@echo "🔍 Running pyright (VS Code type checker)..."
-	cd .. && .venv/bin/python -m pyright scripts/$(EXPERIMENT_SCRIPT) scripts/$(ANALYSIS_SCRIPT) scripts/test_experiment.py
+	$(PYTHON) -m pyright $(EXPERIMENT_SCRIPT) $(ANALYSIS_SCRIPT) test_experiment.py
 
 .PHONY: typecheck-mypy
 typecheck-mypy: ## Run only mypy type checking
