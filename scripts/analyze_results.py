@@ -10,29 +10,115 @@ def analyze_results() -> None:
 
     # Load results from latest symlink
     df = pd.read_csv('results/latest/experiment_results.csv')
-
-    print("=" * 80)
-    print("DETAILED ANALYSIS OF CPU SCHEDULING EXPERIMENT RESULTS")
-    print("=" * 80)
+    
+    print("# CPU Scheduling Experiment Analysis\n")
 
     # Basic stats
-    print(f"\nExperiment Overview:")
-    print(f"- System: {df.iloc[0]['num_cores']} physical cores")
-    print(f"- Duration: 10 seconds per experiment")
-    print(f"- Configurations tested: {len(df)}")
+    print("## Experiment Overview\n")
+    print(f"- **System**: {df.iloc[0]['num_cores']} physical cores")
+    print(f"- **Duration**: 10 seconds per experiment")
+    print(f"- **Configurations tested**: {len(df)}\n")
 
-    # Normalization factors
+    # Check if we have sufficient data for analysis
+    if len(df) < 2:
+        print("⚠️  **Limited Dataset**: Only one configuration tested. Run a full experiment for comprehensive analysis.\n")
+        print("## Single Configuration Results\n")
+        row = df.iloc[0]
+        print(f"- **Workload**: {row['workload']}")
+        print(f"- **Pinning**: {row['pinning']}")
+        print(f"- **Scheduler**: {row['scheduler']}")
+        if row['bogo_cpu'] > 0:
+            print(f"- **CPU Performance**: {row['bogo_cpu']:,} bogo ops ({row['bogo_cpu_persec']:,.1f} ops/sec)")
+        if row['bogo_mem'] > 0:
+            print(f"- **Memory Performance**: {row['bogo_mem']:,} bogo ops ({row['bogo_mem_persec']:,.1f} ops/sec)")
+        print(f"- **Instructions**: {row['instructions']:,.0f}")
+        print(f"- **Cycles**: {row['cycles']:,.0f}")
+        if row['cycles'] > 0:
+            print(f"- **IPC**: {row['instructions']/row['cycles']:.2f}")
+        
+        return
+
+    # Normalization factors (only if we have multiple configs)
     max_cpu = df['bogo_cpu_persec'].max()
     max_mem = df['bogo_mem_persec'].max()
 
-    print(f"\nPerformance Baselines (100%):")
-    print(f"- CPU: {max_cpu:,.0f} bogo ops/sec (achieved with: {df.loc[df['bogo_cpu_persec'].idxmax(), 'workload']}/{df.loc[df['bogo_cpu_persec'].idxmax(), 'pinning']})")
-    print(f"- MEM: {max_mem:,.0f} bogo ops/sec (achieved with: {df.loc[df['bogo_mem_persec'].idxmax(), 'workload']}/{df.loc[df['bogo_mem_persec'].idxmax(), 'pinning']})")
+    print("## Performance Baselines (100%)\n")
+    if max_cpu > 0:
+        best_cpu_row = df.loc[df['bogo_cpu_persec'].idxmax()]
+        print(f"- **CPU**: {max_cpu:,.0f} bogo ops/sec (achieved with: {best_cpu_row['workload']}/{best_cpu_row['pinning']}/{best_cpu_row['scheduler']})")
+    if max_mem > 0:
+        best_mem_row = df.loc[df['bogo_mem_persec'].idxmax()]
+        print(f"- **MEM**: {max_mem:,.0f} bogo ops/sec (achieved with: {best_mem_row['workload']}/{best_mem_row['pinning']}/{best_mem_row['scheduler']})")
+    print()
 
     # Calculate normalized metrics
-    df['cpu_norm'] = df['bogo_cpu_persec'] / max_cpu * 100
-    df['mem_norm'] = df['bogo_mem_persec'] / max_mem * 100
+    df['cpu_norm'] = df['bogo_cpu_persec'] / max_cpu * 100 if max_cpu > 0 else 0
+    df['mem_norm'] = df['bogo_mem_persec'] / max_mem * 100 if max_mem > 0 else 0
     df['combined'] = df['cpu_norm'] + df['mem_norm']
+
+    print("## Performance Analysis by Workload Type\n")
+
+    # Analyze each workload type
+    for workload in ['both', 'cpu', 'mem']:
+        subset = df[df['workload'] == workload]
+        if len(subset) == 0:
+            continue
+            
+        print(f"### {workload.upper()} Workload Results\n")
+        
+        if len(subset) > 1:
+            best_idx = subset['combined'].idxmax()
+            best = subset.loc[best_idx]
+            print(f"**Best Configuration**: {best['pinning']}/{best['scheduler']}")
+            print(f"- CPU: {best['cpu_norm']:.1f}% ({best['bogo_cpu_persec']:,.0f} ops/sec)")
+            print(f"- MEM: {best['mem_norm']:.1f}% ({best['bogo_mem_persec']:,.0f} ops/sec)")
+            print(f"- Combined: {best['combined']:.1f}%\n")
+
+            print("**All Configurations**:\n")
+            print("| Pinning | Scheduler | CPU % | MEM % | Combined % |")
+            print("|---------|-----------|-------|-------|------------|")
+            for _, row in subset.iterrows():
+                print(f"| {row['pinning']} | {row['scheduler']} | {row['cpu_norm']:.1f} | {row['mem_norm']:.1f} | {row['combined']:.1f} |")
+            print()
+        else:
+            row = subset.iloc[0]
+            print(f"**Configuration**: {row['pinning']}/{row['scheduler']}")
+            print(f"- CPU: {row['cpu_norm']:.1f}% ({row['bogo_cpu_persec']:,.0f} ops/sec)")
+            print(f"- MEM: {row['mem_norm']:.1f}% ({row['bogo_mem_persec']:,.0f} ops/sec)")
+            print(f"- Combined: {row['combined']:.1f}%\n")
+
+    # Scheduler comparison if multiple schedulers tested
+    schedulers = df['scheduler'].unique()
+    if len(schedulers) > 1:
+        print("## Scheduler Comparison\n")
+        print("| Scheduler | Avg CPU % | Avg MEM % | Avg Combined % |")
+        print("|-----------|-----------|-----------|----------------|")
+        for sched in schedulers:
+            sched_data = df[df['scheduler'] == sched]
+            avg_cpu = sched_data['cpu_norm'].mean()
+            avg_mem = sched_data['mem_norm'].mean()
+            avg_combined = sched_data['combined'].mean()
+            print(f"| {sched} | {avg_cpu:.1f} | {avg_mem:.1f} | {avg_combined:.1f} |")
+        print()
+
+    # Summary insights
+    print("## Key Insights\n")
+    
+    if len(df) > 1:
+        best_overall = df.loc[df['combined'].idxmax()]
+        print(f"1. **Best Overall Performance**: {best_overall['workload']}/{best_overall['pinning']}/{best_overall['scheduler']} ({best_overall['combined']:.1f}%)")
+        
+        if 'both' in df['workload'].values:
+            both_best = df[df['workload'] == 'both']['combined'].max()
+            print(f"2. **Best Mixed Workload**: {both_best:.1f}% combined throughput")
+        
+        # Pinning strategy analysis
+        pinning_perf = df.groupby('pinning')['combined'].mean().sort_values(ascending=False)
+        best_pinning = pinning_perf.index[0]
+        print(f"3. **Best Pinning Strategy**: {best_pinning} (avg {pinning_perf.iloc[0]:.1f}%)")
+
+    print(f"\n---")
+    print(f"*Analysis generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}*")
 
     print(f"\n" + "="*60)
     print("PERFORMANCE ANALYSIS BY WORKLOAD TYPE")

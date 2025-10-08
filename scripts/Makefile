@@ -12,6 +12,7 @@ ANALYSIS_SCRIPT := analyze_results.py
 LATEST_RESULTS := $(RESULTS_DIR)/latest
 PLOT_FILE := $(LATEST_RESULTS)/experiment_results.png
 CSV_FILE := $(LATEST_RESULTS)/experiment_results.csv
+ANALYSIS_FILE := $(LATEST_RESULTS)/ANALYSIS.md
 
 # Default target
 .PHONY: help
@@ -66,6 +67,7 @@ full_run: check_deps clean experiment analyze ## Run complete experiment: setup 
 	@echo "🎉 Full experiment completed successfully!"
 	@echo "📊 Results: $(CSV_FILE)"
 	@echo "📈 Plot: $(PLOT_FILE)"
+	@echo "📋 Analysis: $(ANALYSIS_FILE)"
 	@echo ""
 
 .PHONY: experiment
@@ -73,18 +75,14 @@ experiment: check_deps ## Run the CPU scheduling experiment only
 	@echo "🧪 Running CPU scheduling experiment..."
 	$(PYTHON) $(EXPERIMENT_SCRIPT)
 
+$(ANALYSIS_FILE): $(CSV_FILE) ## Generate analysis markdown from results
+	@echo "📊 Generating analysis markdown..."
+	$(PYTHON) $(ANALYSIS_SCRIPT) > $(ANALYSIS_FILE)
+	@echo "✅ Analysis written to $(ANALYSIS_FILE)"
+
 .PHONY: analyze
-analyze: ## Run detailed analysis of existing results
-	@echo "📊 Running detailed analysis..."
-	@if [ ! -L "$(LATEST_RESULTS)" ]; then \
-		echo "❌ No latest results found. Run 'make experiment' first."; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(CSV_FILE)" ]; then \
-		echo "❌ Results CSV not found at $(CSV_FILE)"; \
-		exit 1; \
-	fi
-	$(PYTHON) $(ANALYSIS_SCRIPT)
+analyze: $(ANALYSIS_FILE) ## Run detailed analysis of existing results
+	@echo "📊 Analysis complete!"
 
 .PHONY: quick_test
 quick_test: check_deps ## Run a quick 2-second test
