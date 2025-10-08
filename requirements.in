@@ -1,0 +1,14 @@
+# Core data science dependencies
+pandas
+matplotlib
+numpy
+pyyaml
+
+# Type checking dependencies
+mypy
+pyright
+types-PyYAML
+pandas-stubs
+
+# Development tools
+pip-tools

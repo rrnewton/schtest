@@ -34,20 +34,31 @@ This will:
 The experiment requires:
 - **stress-ng**: CPU and memory stress testing tool
 - **perf**: Linux performance monitoring tool  
-- **Python packages**: pandas, matplotlib, numpy, pyyaml
+- **Python packages**: Managed via pip-tools (see [DEPENDENCIES.md](../DEPENDENCIES.md))
 
-Check dependencies with:
-```bash
-make check_deps
-```
-
-Install missing dependencies:
+### System Dependencies
+Install system tools:
 ```bash
 # On Ubuntu/Debian:
 sudo apt-get install stress-ng linux-tools-generic
 
-# Python packages are already installed in the virtual environment
+# On Fedora/RHEL:
+sudo dnf install stress-ng perf
 ```
+
+### Python Dependencies  
+Install Python packages from lock file:
+```bash
+make install_deps        # Production dependencies
+make install_deps_dev    # Development dependencies
+```
+
+Check all dependencies:
+```bash
+make check_deps
+```
+
+For detailed dependency management, see [DEPENDENCIES.md](../DEPENDENCIES.md).
 
 ## Example Workflow
 

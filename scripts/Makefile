@@ -4,7 +4,8 @@
 # Configuration
 PYTHON := ../.venv/bin/python
 VENV_DIR := ../.venv
-PYTHON_DEPS := pandas matplotlib numpy pyyaml mypy pyright types-PyYAML pandas-stubs
+REQUIREMENTS_IN := ../requirements.in
+REQUIREMENTS_LOCK := ../requirements.txt
 RESULTS_DIR := results
 EXPERIMENT_SCRIPT := mem_balance.py
 ANALYSIS_SCRIPT := analyze_results.py
@@ -23,15 +24,34 @@ help: ## Show this help message
 	@echo ""
 
 .PHONY: install_deps
-install_deps: ## Install Python virtual environment and dependencies
+install_deps: ## Install Python virtual environment and dependencies from lock file
 	@echo "📦 Setting up Python environment..."
 	@if [ ! -d "$(VENV_DIR)" ]; then \
 		echo "Creating virtual environment at $(VENV_DIR)..."; \
 		python3 -m venv $(VENV_DIR); \
 	fi
-	@echo "Installing Python packages: $(PYTHON_DEPS)"
-	@$(VENV_DIR)/bin/pip install --upgrade pip
-	@$(VENV_DIR)/bin/pip install $(PYTHON_DEPS)
+	@echo "Installing pip-tools..."
+	@$(VENV_DIR)/bin/pip install --upgrade pip pip-tools
+	@if [ ! -f "$(REQUIREMENTS_LOCK)" ]; then \
+		echo "📋 Lock file not found, generating from $(REQUIREMENTS_IN)..."; \
+		$(MAKE) update_deps; \
+	fi
+	@echo "📦 Installing dependencies from lock file $(REQUIREMENTS_LOCK)..."
+	@$(VENV_DIR)/bin/pip-sync $(REQUIREMENTS_LOCK)
+	@echo "✅ Python environment ready at $(VENV_DIR)"
+
+.PHONY: update_deps
+update_deps: ## Update dependencies and regenerate lock file
+	@echo "🔄 Updating dependencies from $(REQUIREMENTS_IN)..."
+	@if [ ! -d "$(VENV_DIR)" ]; then \
+		echo "❌ Virtual environment not found. Run 'make install_deps' first."; \
+		exit 1; \
+	fi
+	@$(VENV_DIR)/bin/pip-compile --upgrade --output-file $(REQUIREMENTS_LOCK) $(REQUIREMENTS_IN)
+	@echo "✅ Lock file updated: $(REQUIREMENTS_LOCK)"
+
+.PHONY: install_deps_dev
+install_deps_dev: update_deps install_deps ## Update and install dependencies (for development)
 	@echo "✅ Python environment ready at $(VENV_DIR)"
 
 .PHONY: full_run
@@ -74,16 +94,17 @@ typecheck-mypy: ## Run only mypy type checking
 	$(PYTHON) -m mypy --strict $(EXPERIMENT_SCRIPT) $(ANALYSIS_SCRIPT) test_experiment.py
 
 .PHONY: check_deps
-check_deps: ## Check dependencies
+check_deps: ## Check if all dependencies are available
 	@echo "🔍 Checking dependencies..."
-	@if [ ! -f "$(PYTHON)" ]; then \
-		echo "❌ Virtual environment not found. Run 'make install_deps' first."; \
-		exit 1; \
-	fi
-	@$(PYTHON) --version
 	@which stress-ng > /dev/null || (echo "❌ stress-ng missing (install with: sudo dnf install stress-ng)"; exit 1)
 	@which perf > /dev/null || (echo "❌ perf missing (install with: sudo dnf install perf)"; exit 1)
-	@$(PYTHON) -c "import pandas, matplotlib, numpy, yaml, mypy" 2>/dev/null || (echo "❌ Python packages missing. Run 'make install_deps'"; exit 1)
+	@if [ -f "$(REQUIREMENTS_LOCK)" ]; then \
+		echo "📦 Lock file found: $(REQUIREMENTS_LOCK)"; \
+	else \
+		echo "❌ Lock file missing. Run 'make update_deps' first"; exit 1; \
+	fi
+	@$(PYTHON) -c "import pkg_resources; pkg_resources.require(open('$(REQUIREMENTS_LOCK)').read().splitlines())" 2>/dev/null || \
+		(echo "❌ Python packages not in sync with lock file. Run 'make install_deps'"; exit 1)
 	@echo "✅ All dependencies OK!"
 
 .PHONY: clean
