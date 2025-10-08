@@ -20,7 +20,7 @@ from enum import Enum
 from dataclasses import dataclass
 
 # Configuration
-EXPERIMENT_DURATION = 10  # seconds
+EXPERIMENT_DURATION = 6  # seconds
 RESULTS_DIR = Path("./results")
 STRESS_SCRIPT = "./stress.sh"
 
@@ -82,6 +82,7 @@ class ExperimentRunner:
         # Create machine-specific results directory
         self.results_dir = RESULTS_DIR / self.machine_name
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.run_counter = 1
 
     def _get_num_cores(self) -> int:
         """Get number of physical cores on the system."""
@@ -119,17 +120,18 @@ class ExperimentRunner:
         """Generate run configuration name: pinning_scheduler (HOW we run)"""
         return f"{pinning.value}_{scheduler.value}"
 
-    def _get_full_config_name(self, workload: WorkloadType, pinning: PinningStrategy, 
+    def _get_full_config_name(self, workload: WorkloadType, pinning: PinningStrategy,
                              scheduler: SchedulerType) -> str:
         """Generate full configuration name: workload_pinning_scheduler (WHAT + HOW we run)"""
         run_config = self._get_run_config_name(pinning, scheduler)
         return f"{workload.value}_{run_config}"
 
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy, 
-                             scheduler: SchedulerType) -> str:
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
+                             scheduler: SchedulerType, run_dir: Path) -> str:
         """Create stress.sh script for given configuration."""
         P = self.num_cores
         run_config = self._get_run_config_name(pinning, scheduler)
+        run_name = run_dir.name
 
         # Determine taskset arguments based on pinning strategy
         if pinning == PinningStrategy.NONE:
@@ -144,25 +146,28 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
-        # Create script content based on workload
+        # Create script content based on workload with run-specific YAML files
+        cpu_yaml = run_dir / "metrics_cpu.yaml"
+        mem_yaml = run_dir / "metrics_mem.yaml"
+
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{run_config}.yaml \\
+(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
    --cpu {P} --cpu-method int64 {cpu_taskset}) &
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_cpu_{run_config}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
    --cpu {P} --cpu-method int64 {cpu_taskset};
 """
         elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yaml \\
+stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         else:
@@ -176,19 +181,27 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yam
         print(f"Running experiment: workload={workload.value}, pinning={pinning.value}, scheduler={scheduler.value}")
         print(f"{'='*60}")
 
-        # Create and write stress script
-        script_content = self._create_stress_script(workload, pinning, scheduler)
-        with open(STRESS_SCRIPT, 'w') as f:
-            f.write(script_content)
-        os.chmod(STRESS_SCRIPT, 0o755)
-
-        # Run experiment with perf
+        # Create run-specific directory
         full_config = self._get_full_config_name(workload, pinning, scheduler)
-        perf_output_file = self.results_dir / f"perf_{full_config}.json"
+        run_name = f"run_{self.run_counter:03d}_{full_config}"
+        run_dir = self.results_dir / run_name
+        run_dir.mkdir(exist_ok=True)
+
+        print(f"Run directory: {run_dir}")
+
+        # Create and write stress script in run directory
+        stress_script = run_dir / "stress.sh"
+        script_content = self._create_stress_script(workload, pinning, scheduler, run_dir)
+        with open(stress_script, 'w') as f:
+            f.write(script_content)
+        os.chmod(stress_script, 0o755)
+
+        # Run experiment with perf in run directory
+        perf_output_file = run_dir / "perf.json"
         perf_cmd = [
             "perf", "stat", "-j",
             "-e", "instructions,cycles,cache-references,cache-misses",
-            STRESS_SCRIPT
+            str(stress_script)
         ]
 
         print(f"Running: {' '.join(perf_cmd)}")
@@ -209,20 +222,21 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yam
         # Parse results
         cpu_metrics: Optional[StressMetrics] = None
         mem_metrics: Optional[StressMetrics] = None
-        run_config = self._get_run_config_name(pinning, scheduler)
 
-        # Parse stress-ng YAML files
+        # Parse stress-ng YAML files from run directory
         if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_metrics = self._parse_stress_yaml(f"metrics_cpu_{run_config}.yaml")
+            cpu_yaml = run_dir / "metrics_cpu.yaml"
+            cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
 
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            mem_metrics = self._parse_stress_yaml(f"metrics_mem_{run_config}.yaml")
+            mem_yaml = run_dir / "metrics_mem.yaml"
+            mem_metrics = self._parse_stress_yaml(str(mem_yaml))
 
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
 
         # Create typed result
-        return ExperimentResult(
+        experiment_result = ExperimentResult(
             workload=workload,
             pinning=pinning,
             scheduler=scheduler,
@@ -238,6 +252,11 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml metrics_mem_{run_config}.yam
             cache_refs=perf_metrics.cache_refs,
             cache_misses=perf_metrics.cache_misses,
         )
+
+        # Increment run counter for next experiment
+        self.run_counter += 1
+
+        return experiment_result
 
     def _parse_stress_yaml(self, yaml_file: str) -> Optional[StressMetrics]:
         """Parse stress-ng YAML output file."""

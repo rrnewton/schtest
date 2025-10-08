@@ -6,6 +6,7 @@ Quick test script to validate the approach with shorter duration
 import sys
 import argparse
 from typing import Optional
+from pathlib import Path
 sys.path.insert(0, '/home/newton/playground/schtest/scripts')
 
 # Import our main script
@@ -18,10 +19,11 @@ class TestRunner(ExperimentRunner):
         # No need to reference EXPERIMENT_DURATION since we override the script generation
 
     def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy, 
-                             scheduler: SchedulerType) -> str:
+                             scheduler: SchedulerType, run_dir: Path) -> str:
         """Override to use shorter duration."""
         P = self.num_cores
         run_config = self._get_run_config_name(pinning, scheduler)
+        run_name = run_dir.name
 
         # Determine taskset arguments based on pinning strategy
         if pinning == PinningStrategy.NONE:
@@ -37,24 +39,27 @@ class TestRunner(ExperimentRunner):
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
         # Create script content based on workload (with 2 second duration)
+        cpu_yaml = run_dir / "metrics_cpu.yaml"
+        mem_yaml = run_dir / "metrics_mem.yaml"
+        
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-(stress-ng --metrics -t 2 --yaml metrics_cpu_{run_config}.yaml \\
+(stress-ng --metrics -t 2 --yaml {cpu_yaml} \\
    --cpu {P} --cpu-method int64 {cpu_taskset}) &
-stress-ng --metrics -t 2 --yaml metrics_mem_{run_config}.yaml \\
+stress-ng --metrics -t 2 --yaml {mem_yaml} \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t 2 --yaml metrics_cpu_{run_config}.yaml \\
+stress-ng --metrics -t 2 --yaml {cpu_yaml} \\
    --cpu {P} --cpu-method int64 {cpu_taskset};
 """
         elif workload == WorkloadType.MEM:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
-stress-ng --metrics -t 2 --yaml metrics_mem_{run_config}.yaml \\
+stress-ng --metrics -t 2 --yaml {mem_yaml} \\
    --vm {P} --vm-keep --vm-method ror --vm-bytes {P}g {mem_taskset};
 """
         else:
