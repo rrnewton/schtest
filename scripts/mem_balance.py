@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import argparse
 import re
+import time
+import select
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
@@ -23,6 +25,7 @@ from dataclasses import dataclass
 EXPERIMENT_DURATION = 6  # seconds
 RESULTS_DIR = Path("./results")
 STRESS_SCRIPT = "./stress.sh"
+SCX_DIR = Path("../../scx")
 
 # Type Definitions
 class WorkloadType(Enum):
@@ -40,6 +43,7 @@ class PinningStrategy(Enum):
 class SchedulerType(Enum):
     """Enum for scheduler types"""
     DEFAULT = "default"
+    SCX_LAVD = "scx_lavd"
 
 @dataclass
 class StressMetrics:
@@ -126,6 +130,116 @@ class ExperimentRunner:
         run_config = self._get_run_config_name(pinning, scheduler)
         return f"{workload.value}_{run_config}"
 
+    def _start_scheduler(self, scheduler: SchedulerType) -> Optional[subprocess.Popen]:
+        """Start a scheduler process and wait for it to be enabled."""
+        if scheduler == SchedulerType.DEFAULT:
+            return None  # Default scheduler is always active
+        
+        if scheduler == SchedulerType.SCX_LAVD:
+            scheduler_path = SCX_DIR / "target/release/scx_lavd"
+            if not scheduler_path.exists():
+                raise FileNotFoundError(f"Scheduler not found: {scheduler_path}")
+            
+            print(f"Starting scheduler: {scheduler_path}")
+            
+            # Start dmesg monitoring first, then start the scheduler
+            # This ensures we catch the enabled message
+            scheduler_name_map = {
+                SchedulerType.SCX_LAVD: "lavd"
+            }
+            scheduler_name = scheduler_name_map[scheduler]
+            
+            print(f"Starting dmesg monitoring for {scheduler_name} scheduler...")
+            dmesg_proc = subprocess.Popen(
+                ["sudo", "dmesg", "-W"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            if dmesg_proc.stdout is None:
+                dmesg_proc.terminate()
+                raise RuntimeError("Failed to start dmesg monitoring")
+            
+            try:
+                # Start the scheduler process with sudo
+                proc = subprocess.Popen(
+                    ["sudo", str(scheduler_path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                # Wait for scheduler to be enabled by monitoring dmesg output
+                self._wait_for_scheduler_enabled_with_dmesg(scheduler_name, dmesg_proc)
+                return proc
+                
+            except Exception:
+                # Clean up dmesg process if scheduler startup fails
+                dmesg_proc.terminate()
+                try:
+                    dmesg_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    dmesg_proc.kill()
+                    dmesg_proc.wait()
+                raise
+        
+        raise ValueError(f"Unknown scheduler: {scheduler}")
+    
+    def _wait_for_scheduler_enabled_with_dmesg(self, scheduler_name: str, dmesg_proc: subprocess.Popen) -> None:
+        """Wait for scheduler enabled message from already-running dmesg process."""
+        print(f"Waiting for {scheduler_name} scheduler to be enabled...")
+        
+        try:
+            timeout = 30  # 30 second timeout
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                if dmesg_proc.poll() is not None:
+                    # dmesg process died
+                    raise RuntimeError("dmesg monitoring process died")
+                    
+                # Read with timeout to avoid blocking forever
+                ready, _, _ = select.select([dmesg_proc.stdout], [], [], 1.0)
+                
+                if ready and dmesg_proc.stdout:
+                    line = dmesg_proc.stdout.readline()
+                    if line:
+                        print(f"dmesg: {line.strip()}")  # Debug output
+                        # Look for scheduler enabled message
+                        if f'sched_ext: BPF scheduler "{scheduler_name}_' in line and "enabled" in line:
+                            print(f"Scheduler {scheduler_name} enabled successfully")
+                            time.sleep(1)  # Give it a moment to fully initialize
+                            return
+            
+            raise RuntimeError(f"Timeout waiting for {scheduler_name} scheduler to be enabled")
+            
+        finally:
+            # Clean up dmesg process
+            dmesg_proc.terminate()
+            try:
+                dmesg_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dmesg_proc.kill()
+                dmesg_proc.wait()
+
+    def _stop_scheduler(self, proc: Optional[subprocess.Popen]) -> None:
+        """Stop a scheduler process."""
+        if proc is None:
+            return
+        
+        print("Stopping scheduler...")
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.CalledProcessError:
+            print("Scheduler didn't terminate gracefully, killing...")
+            proc.kill()
+            proc.wait()
+        print("Scheduler stopped")
+
     def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
                              scheduler: SchedulerType, run_dir: Path) -> str:
         """Create stress.sh script for given configuration."""
@@ -196,28 +310,37 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             f.write(script_content)
         os.chmod(stress_script, 0o755)
 
-        # Run experiment with perf in run directory
-        perf_output_file = run_dir / "perf.json"
-        perf_cmd = [
-            "perf", "stat", "-j",
-            "-e", "instructions,cycles,cache-references,cache-misses",
-            str(stress_script)
-        ]
+        # Start scheduler if needed
+        scheduler_proc = None
+        try:
+            scheduler_proc = self._start_scheduler(scheduler)
 
-        print(f"Running: {' '.join(perf_cmd)}")
+            # Run experiment with perf in run directory
+            perf_output_file = run_dir / "perf.json"
+            perf_cmd = [
+                "perf", "stat", "-j",
+                "-e", "instructions,cycles,cache-references,cache-misses",
+                str(stress_script)
+            ]
 
-        # Run the experiment
-        with open(perf_output_file, 'w') as perf_file:
-            result = subprocess.run(
-                perf_cmd,
-                stdout=subprocess.PIPE,
-                stderr=perf_file,
-                text=True
-            )
+            print(f"Running: {' '.join(perf_cmd)}")
 
-        if result.returncode != 0:
-            print(f"Warning: Experiment failed with return code {result.returncode}")
-            print(f"stdout: {result.stdout}")
+            # Run the experiment
+            with open(perf_output_file, 'w') as perf_file:
+                result = subprocess.run(
+                    perf_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=perf_file,
+                    text=True
+                )
+
+            if result.returncode != 0:
+                print(f"Warning: Experiment failed with return code {result.returncode}")
+                print(f"stdout: {result.stdout}")
+
+        finally:
+            # Always stop the scheduler if we started one
+            self._stop_scheduler(scheduler_proc)
 
         # Parse results
         cpu_metrics: Optional[StressMetrics] = None

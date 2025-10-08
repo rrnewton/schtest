@@ -71,6 +71,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Quick CPU Scheduling Experiment Test")
     parser.add_argument("--machine", type=str, default=None,
                        help="Machine name tag (default: auto-detect from /proc/cpuinfo)")
+    parser.add_argument("--scheduler", type=str, default="default",
+                       choices=["default", "scx_lavd"],
+                       help="Scheduler type to test (default: default)")
     args = parser.parse_args()
 
     print("Running quick test with 2-second experiments...")
@@ -78,11 +81,13 @@ def main() -> None:
     print(f"Machine: {runner.machine_name}")
     print(f"Results directory: {runner.results_dir}")
 
-    # Test just one configuration
-    result = runner._run_experiment(WorkloadType.CPU, PinningStrategy.SPREAD)
+    # Test specified scheduler
+    scheduler = SchedulerType.DEFAULT if args.scheduler == "default" else SchedulerType.SCX_LAVD
+    result = runner._run_experiment(WorkloadType.CPU, PinningStrategy.SPREAD, scheduler)
     print("\nTest result:")
     print(f"  workload: {result.workload.value}")
     print(f"  pinning: {result.pinning.value}")
+    print(f"  scheduler: {result.scheduler.value}")
     print(f"  scheduler: {result.scheduler.value}")
     print(f"  bogo_cpu: {result.bogo_cpu}")
     print(f"  bogo_cpu_persec: {result.bogo_cpu_persec}")
