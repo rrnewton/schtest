@@ -8,8 +8,8 @@ import pandas as pd
 def analyze_results() -> None:
     """Provide detailed analysis of the experiment results."""
 
-    # Load results
-    df = pd.read_csv('results/experiment_results.csv')
+    # Load results from latest symlink
+    df = pd.read_csv('results/latest/experiment_results.csv')
 
     print("=" * 80)
     print("DETAILED ANALYSIS OF CPU SCHEDULING EXPERIMENT RESULTS")

@@ -486,6 +486,21 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         print(f"\n{'='*60}")
         print("All experiments completed!")
         print(f"{'='*60}")
+        
+        # Create/update latest symlink
+        self._update_latest_symlink()
+
+    def _update_latest_symlink(self) -> None:
+        """Create or update symlink to latest results."""
+        latest_path = RESULTS_DIR / "latest"
+        
+        # Remove existing symlink if it exists
+        if latest_path.exists() or latest_path.is_symlink():
+            latest_path.unlink()
+        
+        # Create new symlink to current results directory
+        latest_path.symlink_to(self.results_dir.name)
+        print(f"Updated latest results symlink: {latest_path} -> {self.results_dir.name}")
 
     def _save_results(self) -> None:
         """Save results to CSV file."""

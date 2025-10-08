@@ -93,6 +93,9 @@ def main() -> None:
     print(f"  bogo_cpu_persec: {result.bogo_cpu_persec}")
     print(f"  instructions: {result.instructions}")
     print(f"  cycles: {result.cycles}")
+    
+    # Update latest symlink for quick testing
+    runner._update_latest_symlink()
 
 if __name__ == "__main__":
     main()

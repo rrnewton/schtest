@@ -9,8 +9,9 @@ REQUIREMENTS_LOCK := requirements.txt
 RESULTS_DIR := results
 EXPERIMENT_SCRIPT := mem_balance.py
 ANALYSIS_SCRIPT := analyze_results.py
-PLOT_FILE := $(RESULTS_DIR)/experiment_results.png
-CSV_FILE := $(RESULTS_DIR)/experiment_results.csv
+LATEST_RESULTS := $(RESULTS_DIR)/latest
+PLOT_FILE := $(LATEST_RESULTS)/experiment_results.png
+CSV_FILE := $(LATEST_RESULTS)/experiment_results.csv
 
 # Default target
 .PHONY: help
@@ -68,16 +69,21 @@ full_run: check_deps clean experiment analyze ## Run complete experiment: setup 
 	@echo ""
 
 .PHONY: experiment
-experiment: $(CSV_FILE) ## Run the CPU scheduling experiment only
-
-$(CSV_FILE): $(EXPERIMENT_SCRIPT)
+experiment: check_deps ## Run the CPU scheduling experiment only
 	@echo "🧪 Running CPU scheduling experiment..."
-	@echo "⏱️  This will take approximately 90 seconds..."
 	$(PYTHON) $(EXPERIMENT_SCRIPT)
 
 .PHONY: analyze
-analyze: $(CSV_FILE) ## Run detailed analysis of existing results
+analyze: ## Run detailed analysis of existing results
 	@echo "📊 Running detailed analysis..."
+	@if [ ! -L "$(LATEST_RESULTS)" ]; then \
+		echo "❌ No latest results found. Run 'make experiment' first."; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(CSV_FILE)" ]; then \
+		echo "❌ Results CSV not found at $(CSV_FILE)"; \
+		exit 1; \
+	fi
 	$(PYTHON) $(ANALYSIS_SCRIPT)
 
 .PHONY: quick_test
@@ -115,8 +121,7 @@ check_deps: ## Check if all dependencies are available
 .PHONY: clean
 clean: ## Clean up all generated files
 	@echo "🧹 Cleaning up..."
-	rm -f stress.sh metrics_*.yaml
-	rm -rf $(RESULTS_DIR) __pycache__
+	rm -rf __pycache__ .mypy_cache
 	@echo "✅ Cleanup complete!"
 
 .PHONY: view_results
