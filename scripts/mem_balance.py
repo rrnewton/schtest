@@ -581,13 +581,17 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         print(df[summary_cols].round(1).to_string(index=False))
 
     def _create_plots(self, df: pd.DataFrame, max_cpu_persec: float, max_mem_persec: float) -> None:
-        """Create stacked bar chart visualization."""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+        """Create improved stacked bar chart visualization."""
+        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
         fig.suptitle(f'CPU Scheduling Experiment Results\n'
                      f'100% CPU = {max_cpu_persec:,.0f} ops/sec, '
                      f'100% MEM = {max_mem_persec:,.0f} ops/sec')
 
-        # Plot 1: Stacked bar chart
+        # Consistent colors for CPU and MEM across all bars
+        cpu_color = '#2E86AB'  # Blue for CPU
+        mem_color = '#A23B72'  # Purple for MEM
+        
+        # Plot: Stacked bar chart with consistent colors
         workloads = ['both', 'cpu', 'mem']
         pinning_strategies = ['none', 'spread', 'half']
 
@@ -609,59 +613,41 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                     cpu_values.append(0.0)
                     mem_values.append(0.0)
 
-            # Create stacked bars
+            # Create stacked bars with consistent colors
             x_offset = x_pos + i * width
-            ax1.bar(x_offset, cpu_values, width, label=f'CPU ({pinning})',
-                          alpha=0.8, color=f'C{i}')
-            ax1.bar(x_offset, mem_values, width, bottom=cpu_values,
-                          label=f'MEM ({pinning})', alpha=0.6, color=f'C{i+3}')
+            cpu_bars = ax.bar(x_offset, cpu_values, width, 
+                            label='CPU' if i == 0 else '', 
+                            color=cpu_color, alpha=0.8)
+            mem_bars = ax.bar(x_offset, mem_values, width, bottom=cpu_values,
+                            label='MEM' if i == 0 else '',
+                            color=mem_color, alpha=0.8)
 
-        ax1.set_xlabel('Workload Type')
-        ax1.set_ylabel('Normalized Performance (%)')
-        ax1.set_title(f'CPU Scheduling Experiment Results\n'
-                     f'100% CPU = {max_cpu_persec:,.0f} ops/sec, '
-                     f'100% MEM = {max_mem_persec:,.0f} ops/sec')
-        ax1.set_xticks(x_pos + width)
-        ax1.set_xticklabels(workloads)
-        ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 220)
+            # Add percentage labels on bars
+            for j, (cpu_bar, mem_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values)):
+                # CPU label (middle of CPU portion)
+                if cpu_val > 5:  # Only show label if bar is tall enough
+                    ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
+                           f'{cpu_val:.0f}%', ha='center', va='center', 
+                           fontweight='bold', fontsize=9, color='white')
+                
+                # MEM label (middle of MEM portion)
+                if mem_val > 5:  # Only show label if bar is tall enough
+                    ax.text(mem_bar.get_x() + mem_bar.get_width()/2, 
+                           cpu_val + mem_val/2,
+                           f'{mem_val:.0f}%', ha='center', va='center',
+                           fontweight='bold', fontsize=9, color='white')
 
-        # Plot 2: Combined throughput comparison
-        combined_data: List[float] = []
-        labels: List[str] = []
-        colors: List[str] = []
-
-        color_map = {'none': 'red', 'spread': 'green', 'half': 'blue'}
-
-        for workload in workloads:
-            workload_data: List[float] = []
-            for pinning in pinning_strategies:
-                subset = df[(df['workload'] == workload) & (df['pinning'] == pinning)]
-                if len(subset) > 0:
-                    workload_data.append(float(subset['combined_tput'].iloc[0]))
-                    labels.append(f'{workload}\n{pinning}')
-                    colors.append(color_map[pinning])
-                else:
-                    workload_data.append(0.0)
-            combined_data.extend(workload_data)
-
-        x_pos2 = np.arange(len(labels))
-        bars = ax2.bar(x_pos2, combined_data, color=colors, alpha=0.7)
-
-        ax2.set_xlabel('Configuration')
-        ax2.set_ylabel('Combined Throughput (%)')
-        ax2.set_title('Combined CPU + Memory Throughput')
-        ax2.set_xticks(x_pos2)
-        ax2.set_xticklabels(labels, rotation=45, ha='right')
-        ax2.grid(True, alpha=0.3)
-        ax2.set_ylim(0, 220)
-
-        # Add value labels on bars
-        for bar, value in zip(bars, combined_data):
-            if value > 0:
-                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
-                        f'{value:.1f}%', ha='center', va='bottom', fontsize=9)
+        # Update x-axis labels to show pinning strategies
+        workload_labels = [f'{wl}\n(none/spread/half)' for wl in workloads]
+        
+        ax.set_xlabel('Workload Type (Pinning Strategies Left to Right)')
+        ax.set_ylabel('Normalized Performance (%)')
+        ax.set_title('CPU Scheduling Performance by Workload and Pinning Strategy')
+        ax.set_xticks(x_pos + width)
+        ax.set_xticklabels(workload_labels)
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylim(0, 220)
 
         plt.tight_layout()
 
