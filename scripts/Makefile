@@ -47,10 +47,17 @@ quick_test: check_deps ## Run a quick 2-second test
 	$(PYTHON) test_experiment.py
 
 .PHONY: typecheck
-typecheck: ## Run strict type checking on all Python files
-	@echo "🔍 Running type checking..."
+typecheck: typecheck-vscode typecheck-mypy
+
+.PHONY: typecheck-vscode
+typecheck-vscode: ## Run pyright type checking (matches VS Code exactly)
+	@echo "🔍 Running pyright (VS Code type checker)..."
+	cd .. && .venv/bin/python -m pyright scripts/$(EXPERIMENT_SCRIPT) scripts/$(ANALYSIS_SCRIPT) scripts/test_experiment.py
+
+.PHONY: typecheck-mypy
+typecheck-mypy: ## Run only mypy type checking
+	@echo "🔍 Running mypy type checking..."
 	$(PYTHON) -m mypy --strict $(EXPERIMENT_SCRIPT) $(ANALYSIS_SCRIPT) test_experiment.py
-	@echo "✅ Type checking passed!"
 
 .PHONY: check_deps
 check_deps: ## Check dependencies
