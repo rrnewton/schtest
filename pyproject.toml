@@ -1,0 +1,34 @@
+[tool.pyright]
+# Configure Pyright/Pylance to be less strict about third-party libraries
+# while maintaining strict checking for our own code
+
+# Type checking mode - keep strict for our code
+# typeCheckingMode = "strict"
+typeCheckingMode = "standard"
+
+# Python environment configuration
+pythonPath = ".venv/bin/python"
+venvPath = "."
+venv = ".venv"
+
+# Include/exclude paths
+include = ["scripts"]
+exclude = ["**/__pycache__", "**/.mypy_cache"]
+
+# # Suppress warnings about third-party library types (matplotlib, pandas, etc.)
+# reportUnknownMemberType = "none"        # Fixes "Type of 'savefig' is partially unknown"
+# reportUnknownVariableType = "none"      # Fixes "Type of 'result_dict' is partially unknown" 
+# reportUnknownArgumentType = "none"      # Fixes argument type issues with third-party functions
+# reportUnknownLambdaType = "none"        # Fixes lambda type issues
+# reportUnknownParameterType = "none"     # Fixes parameter type issues
+
+# # Keep important checks for our code
+# reportMissingImports = true             # Still catch import errors
+# reportMissingTypeStubs = false          # Don't warn about missing stubs for third-party libs
+# reportUntypedFunctionDecorator = "none" # Don't warn about decorators without types
+# reportGeneralTypeIssues = "warning"     # Keep general type issue warnings
+# reportPrivateUsage = "none"             # Don't warn about protected method usage in tests
+
+# # Specific to pandas/matplotlib issues
+# reportIncompatibleMethodOverride = "warning"
+# reportIncompatibleVariableOverride = "warning"
