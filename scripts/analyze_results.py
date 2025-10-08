@@ -10,7 +10,7 @@ def analyze_results() -> None:
 
     # Load results from latest symlink
     df = pd.read_csv('results/latest/experiment_results.csv')
-    
+
     print("# CPU Scheduling Experiment Analysis\n")
 
     # Basic stats
@@ -35,7 +35,7 @@ def analyze_results() -> None:
         print(f"- **Cycles**: {row['cycles']:,.0f}")
         if row['cycles'] > 0:
             print(f"- **IPC**: {row['instructions']/row['cycles']:.2f}")
-        
+
         return
 
     # Normalization factors (only if we have multiple configs)
@@ -63,9 +63,9 @@ def analyze_results() -> None:
         subset = df[df['workload'] == workload]
         if len(subset) == 0:
             continue
-            
+
         print(f"### {workload.upper()} Workload Results\n")
-        
+
         if len(subset) > 1:
             best_idx = subset['combined'].idxmax()
             best = subset.loc[best_idx]
@@ -103,15 +103,15 @@ def analyze_results() -> None:
 
     # Summary insights
     print("## Key Insights\n")
-    
+
     if len(df) > 1:
         best_overall = df.loc[df['combined'].idxmax()]
         print(f"1. **Best Overall Performance**: {best_overall['workload']}/{best_overall['pinning']}/{best_overall['scheduler']} ({best_overall['combined']:.1f}%)")
-        
+
         if 'both' in df['workload'].values:
             both_best = df[df['workload'] == 'both']['combined'].max()
             print(f"2. **Best Mixed Workload**: {both_best:.1f}% combined throughput")
-        
+
         # Pinning strategy analysis
         pinning_perf = df.groupby('pinning')['combined'].mean().sort_values(ascending=False)
         best_pinning = pinning_perf.index[0]

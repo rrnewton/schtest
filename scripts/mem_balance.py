@@ -80,7 +80,7 @@ class ExperimentResult:
 
 class SchedStartMonitor:
     """Monitor dmesg for scheduler enabled messages."""
-    
+
     def __init__(self, scheduler_name: str) -> None:
         """Start dmesg monitoring for the given scheduler."""
         self.scheduler_name = scheduler_name
@@ -92,27 +92,27 @@ class SchedStartMonitor:
             bufsize=1,
             universal_newlines=True
         )
-        
+
         if self.dmesg_proc.stdout is None:
             self.teardown()
             raise RuntimeError("Failed to start dmesg monitoring")
-        
+
         print(f"Started dmesg monitoring for {scheduler_name} scheduler...")
-    
+
     def wait_for_sched_enabled(self, timeout: float = 30.0) -> None:
         """Wait for scheduler enabled message."""
         print(f"Waiting for {self.scheduler_name} scheduler to be enabled...")
-        
+
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             if self.dmesg_proc.poll() is not None:
                 # dmesg process died
                 raise RuntimeError("dmesg monitoring process died")
-                
+
             # Read with timeout to avoid blocking forever
             ready, _, _ = select.select([self.dmesg_proc.stdout], [], [], 1.0)
-            
+
             if ready and self.dmesg_proc.stdout:
                 line = self.dmesg_proc.stdout.readline()
                 if line:
@@ -122,9 +122,9 @@ class SchedStartMonitor:
                         print(f"Scheduler {self.scheduler_name} enabled successfully")
                         time.sleep(1)  # Give it a moment to fully initialize
                         return
-        
+
         raise RuntimeError(f"Timeout waiting for {self.scheduler_name} scheduler to be enabled")
-    
+
     def teardown(self) -> None:
         """Clean up dmesg monitoring process."""
         if hasattr(self, 'dmesg_proc') and self.dmesg_proc:
@@ -191,22 +191,22 @@ class ExperimentRunner:
         """Start a scheduler process and wait for it to be enabled."""
         if scheduler == SchedulerType.DEFAULT:
             return None  # Default scheduler is always active
-        
+
         if scheduler == SchedulerType.SCX_LAVD:
             scheduler_path = SCX_DIR / "target/release/scx_lavd"
             if not scheduler_path.exists():
                 raise FileNotFoundError(f"Scheduler not found: {scheduler_path}")
-            
+
             print(f"Starting scheduler: {scheduler_path}")
-            
+
             # Start dmesg monitoring first
             scheduler_name_map = {
                 SchedulerType.SCX_LAVD: "lavd"
             }
             scheduler_name = scheduler_name_map[scheduler]
-            
+
             monitor = SchedStartMonitor(scheduler_name)
-            
+
             try:
                 # Start the scheduler process with sudo
                 proc = subprocess.Popen(
@@ -215,11 +215,11 @@ class ExperimentRunner:
                     stderr=subprocess.PIPE,
                     text=True
                 )
-                
+
                 # Wait for scheduler to be enabled
                 monitor.wait_for_sched_enabled()
                 return proc
-                
+
             except Exception:
                 # Clean up monitor if scheduler startup fails
                 monitor.teardown()
@@ -227,22 +227,22 @@ class ExperimentRunner:
             finally:
                 # Always clean up the monitor
                 monitor.teardown()
-        
+
         raise ValueError(f"Unknown scheduler: {scheduler}")
-    
+
     def _get_cpu_stress_params(self, num_cores: int) -> str:
         """Get stress-ng CPU workload parameters as a function of core count."""
         return f"--cpu {num_cores} --cpu-method int64"
-    
+
     def _get_mem_stress_params(self, num_cores: int) -> str:
         """Get stress-ng memory workload parameters as a function of core count."""
         return f"--vm {num_cores} --vm-keep --vm-method ror --vm-bytes {num_cores}g"
-    
+
     def _stop_scheduler(self, proc: Optional[subprocess.Popen]) -> None:
         """Stop a scheduler process."""
         if proc is None:
             return
-        
+
         print("Stopping scheduler...")
         proc.terminate()
         try:
@@ -276,7 +276,7 @@ class ExperimentRunner:
         # Create script content based on workload with run-specific YAML files
         cpu_yaml = run_dir / "metrics_cpu.yaml"
         mem_yaml = run_dir / "metrics_mem.yaml"
-        
+
         # Get abstracted stress-ng parameters
         cpu_params = self._get_cpu_stress_params(P)
         mem_params = self._get_mem_stress_params(P)
@@ -498,18 +498,18 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         print(f"\n{'='*60}")
         print("All experiments completed!")
         print(f"{'='*60}")
-        
+
         # Create/update latest symlink
         self._update_latest_symlink()
 
     def _update_latest_symlink(self) -> None:
         """Create or update symlink to latest results."""
         latest_path = RESULTS_DIR / "latest"
-        
+
         # Remove existing symlink if it exists
         if latest_path.exists() or latest_path.is_symlink():
             latest_path.unlink()
-        
+
         # Create new symlink to current results directory
         latest_path.symlink_to(self.results_dir.name)
         print(f"Updated latest results symlink: {latest_path} -> {self.results_dir.name}")
@@ -602,7 +602,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         # Consistent colors for CPU and MEM across all bars
         cpu_color = '#2E86AB'  # Blue for CPU
         mem_color = '#A23B72'  # Purple for MEM
-        
+
         # Plot: Stacked bar chart with consistent colors
         workloads = ['both', 'cpu', 'mem']
         pinning_strategies = ['none', 'spread', 'half']
@@ -627,8 +627,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
 
             # Create stacked bars with consistent colors
             x_offset = x_pos + i * width
-            cpu_bars = ax.bar(x_offset, cpu_values, width, 
-                            label='CPU' if i == 0 else '', 
+            cpu_bars = ax.bar(x_offset, cpu_values, width,
+                            label='CPU' if i == 0 else '',
                             color=cpu_color, alpha=0.8)
             mem_bars = ax.bar(x_offset, mem_values, width, bottom=cpu_values,
                             label='MEM' if i == 0 else '',
@@ -639,19 +639,19 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                 # CPU label (middle of CPU portion)
                 if cpu_val > 5:  # Only show label if bar is tall enough
                     ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
-                           f'{cpu_val:.0f}%', ha='center', va='center', 
+                           f'{cpu_val:.0f}%', ha='center', va='center',
                            fontweight='bold', fontsize=9, color='white')
-                
+
                 # MEM label (middle of MEM portion)
                 if mem_val > 5:  # Only show label if bar is tall enough
-                    ax.text(mem_bar.get_x() + mem_bar.get_width()/2, 
+                    ax.text(mem_bar.get_x() + mem_bar.get_width()/2,
                            cpu_val + mem_val/2,
                            f'{mem_val:.0f}%', ha='center', va='center',
                            fontweight='bold', fontsize=9, color='white')
 
         # Update x-axis labels to show pinning strategies
         workload_labels = [f'{wl}\n(none/spread/half)' for wl in workloads]
-        
+
         ax.set_xlabel('Workload Type (Pinning Strategies Left to Right)')
         ax.set_ylabel('Normalized Performance (%)')
         ax.set_title('CPU Scheduling Performance by Workload and Pinning Strategy')

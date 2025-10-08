@@ -18,7 +18,7 @@ class TestRunner(ExperimentRunner):
         super().__init__(machine_name=machine_name)
         # No need to reference EXPERIMENT_DURATION since we override the script generation
 
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy, 
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
                              scheduler: SchedulerType, run_dir: Path) -> str:
         """Override to use shorter duration."""
         P = self.num_cores
@@ -41,7 +41,7 @@ class TestRunner(ExperimentRunner):
         # Create script content based on workload (with 2 second duration)
         cpu_yaml = run_dir / "metrics_cpu.yaml"
         mem_yaml = run_dir / "metrics_mem.yaml"
-        
+
         if workload == WorkloadType.BOTH:
             script_content = f"""#!/bin/bash
 set -xeuo pipefail
@@ -93,7 +93,7 @@ def main() -> None:
     print(f"  bogo_cpu_persec: {result.bogo_cpu_persec}")
     print(f"  instructions: {result.instructions}")
     print(f"  cycles: {result.cycles}")
-    
+
     # Update latest symlink for quick testing
     runner._update_latest_symlink()
 
