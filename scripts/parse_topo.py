@@ -259,7 +259,7 @@ class Machine:
 class LstopoParser:
     """Parser for lstopo XML output."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.machine: Optional[Machine] = None
 
     def _run_command(self, cmd: List[str]) -> str:
@@ -469,7 +469,7 @@ def parse_topology() -> Machine:
     return parser.parse_topology()
 
 
-def main():
+def main() -> None:
     """Main function for CLI usage."""
     if len(sys.argv) > 1 and sys.argv[1] in ["-h", "--help"]:
         print(__doc__)

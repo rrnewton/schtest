@@ -21,6 +21,9 @@ from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
 from dataclasses import dataclass
 
+# Import topology parser
+from parse_topo import parse_topology, Machine
+
 # Configuration
 EXPERIMENT_DURATION = 6  # seconds
 RESULTS_DIR = Path("./results")
@@ -46,6 +49,68 @@ class SchedulerType(Enum):
     SCX_LAVD = "scx_lavd"
 
 @dataclass
+class ExperimentParams:
+    """Parameters that uniquely identify an experiment run."""
+    workload: WorkloadType
+    scheduler: SchedulerType
+    pinning: PinningStrategy
+    num_cores: int
+    experiment_duration: int
+    machine: str
+    kernel: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for YAML serialization."""
+        return {
+            'workload': self.workload.value,
+            'scheduler': self.scheduler.value,
+            'pinning': self.pinning.value,
+            'num_cores': self.num_cores,
+            'experiment_duration': self.experiment_duration,
+            'machine': self.machine,
+            'kernel': self.kernel
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ExperimentParams':
+        """Create from dictionary loaded from YAML."""
+        return cls(
+            workload=WorkloadType(data['workload']),
+            scheduler=SchedulerType(data['scheduler']),
+            pinning=PinningStrategy(data['pinning']),
+            num_cores=data['num_cores'],
+            experiment_duration=data['experiment_duration'],
+            machine=data['machine'],
+            kernel=data['kernel']
+        )
+
+    def __eq__(self, other: object) -> bool:
+        """Check if two experiment params are equivalent."""
+        if not isinstance(other, ExperimentParams):
+            return False
+        return (
+            self.workload == other.workload and
+            self.scheduler == other.scheduler and
+            self.pinning == other.pinning and
+            self.num_cores == other.num_cores and
+            self.experiment_duration == other.experiment_duration and
+            self.machine == other.machine and
+            self.kernel == other.kernel
+        )
+
+    def __hash__(self) -> int:
+        """Make hashable for use in sets."""
+        return hash((
+            self.workload.value,
+            self.scheduler.value,
+            self.pinning.value,
+            self.num_cores,
+            self.experiment_duration,
+            self.machine,
+            self.kernel
+        ))
+
+@dataclass
 class StressMetrics:
     """Typed structure for stress-ng metrics"""
     bogo_ops: int
@@ -63,10 +128,7 @@ class PerfMetrics:
 @dataclass
 class ExperimentResult:
     """Typed structure for complete experiment results"""
-    workload: WorkloadType
-    pinning: PinningStrategy
-    scheduler: SchedulerType
-    num_cores: int
+    params: ExperimentParams
     bogo_cpu: int
     bogo_cpu_persec: float
     real_time_cpu: float
@@ -77,6 +139,23 @@ class ExperimentResult:
     cycles: float
     cache_refs: float
     cache_misses: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for CSV serialization."""
+        result = self.params.to_dict()
+        result.update({
+            'bogo_cpu': self.bogo_cpu,
+            'bogo_cpu_persec': self.bogo_cpu_persec,
+            'real_time_cpu': self.real_time_cpu,
+            'bogo_mem': self.bogo_mem,
+            'bogo_mem_persec': self.bogo_mem_persec,
+            'real_time_mem': self.real_time_mem,
+            'instructions': self.instructions,
+            'cycles': self.cycles,
+            'cache_refs': self.cache_refs,
+            'cache_misses': self.cache_misses
+        })
+        return result
 
 class SchedStartMonitor:
     """Monitor dmesg for scheduler enabled messages."""
@@ -139,6 +218,12 @@ class ExperimentRunner:
     def __init__(self, machine_name: Optional[str] = None) -> None:
         self.num_cores = self._get_num_cores()
         self.machine_name = machine_name or self._get_machine_name_from_cpuinfo()
+
+        # Parse CPU topology
+        print("Parsing CPU topology...")
+        self.topology = parse_topology()
+        print(f"Topology parsed: {len(self.topology.packages)} packages, {len(self.topology.get_cpu_numbers())} CPUs")
+
         self.results: List[ExperimentResult] = []
         # Create machine-specific results directory
         self.results_dir = RESULTS_DIR / self.machine_name
@@ -187,7 +272,7 @@ class ExperimentRunner:
         run_config = self._get_run_config_name(pinning, scheduler)
         return f"{workload.value}_{run_config}"
 
-    def _start_scheduler(self, scheduler: SchedulerType) -> Optional[subprocess.Popen]:
+    def _start_scheduler(self, scheduler: SchedulerType) -> Optional[subprocess.Popen[str]]:
         """Start a scheduler process and wait for it to be enabled."""
         if scheduler == SchedulerType.DEFAULT:
             return None  # Default scheduler is always active
@@ -238,7 +323,7 @@ class ExperimentRunner:
         """Get stress-ng memory workload parameters as a function of core count."""
         return f"--vm {num_cores} --vm-keep --vm-method ror --vm-bytes {num_cores}g"
 
-    def _stop_scheduler(self, proc: Optional[subprocess.Popen]) -> None:
+    def _stop_scheduler(self, proc: Optional[subprocess.Popen[str]]) -> None:
         """Stop a scheduler process."""
         if proc is None:
             return
@@ -260,16 +345,32 @@ class ExperimentRunner:
         run_config = self._get_run_config_name(pinning, scheduler)
         run_name = run_dir.name
 
-        # Determine taskset arguments based on pinning strategy
+        # Determine taskset arguments based on pinning strategy using topology
         if pinning == PinningStrategy.NONE:
             cpu_taskset = ""
             mem_taskset = ""
         elif pinning == PinningStrategy.SPREAD:
-            cpu_taskset = f"--taskset 0-{P-1}"
-            mem_taskset = f"--taskset {P}-{2*P-1}"
+            # Use split_hyperthreads to spread across all cores
+            try:
+                cpu_list, mem_list = self.topology.split_hyperthreads()
+                cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
+                mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
+                print(f"SPREAD strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
+            except ValueError as e:
+                print(f"Warning: Could not split hyperthreads ({e}), falling back to no pinning")
+                cpu_taskset = ""
+                mem_taskset = ""
         elif pinning == PinningStrategy.HALF:
-            cpu_taskset = "--taskset even"
-            mem_taskset = "--taskset odd"
+            # Use split_dies to occupy only half of the cores physically
+            try:
+                cpu_list, mem_list = self.topology.split_dies()
+                cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
+                mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
+                print(f"HALF strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
+            except ValueError as e:
+                print(f"Warning: Could not split dies ({e}), falling back to no pinning")
+                cpu_taskset = ""
+                mem_taskset = ""
         else:
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
@@ -305,6 +406,26 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             raise ValueError(f"Unknown workload: {workload}")
 
         return script_content
+
+    def _get_kernel_version(self) -> str:
+        """Get kernel version from uname -r."""
+        try:
+            result = subprocess.run(["uname", "-r"], capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            return "unknown"
+
+    def _create_experiment_params(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType) -> ExperimentParams:
+        """Create experiment parameters for this run."""
+        return ExperimentParams(
+            workload=workload,
+            scheduler=scheduler,
+            pinning=pinning,
+            num_cores=self.num_cores,
+            experiment_duration=EXPERIMENT_DURATION,
+            machine=self.machine_name,
+            kernel=self._get_kernel_version()
+        )
 
     def _run_experiment(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType = SchedulerType.DEFAULT) -> ExperimentResult:
         """Run a single experiment configuration."""
@@ -375,12 +496,12 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
 
+        # Create experiment parameters
+        params = self._create_experiment_params(workload, pinning, scheduler)
+
         # Create typed result
         experiment_result = ExperimentResult(
-            workload=workload,
-            pinning=pinning,
-            scheduler=scheduler,
-            num_cores=self.num_cores,
+            params=params,
             bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
             bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
             real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
@@ -392,6 +513,12 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             cache_refs=perf_metrics.cache_refs,
             cache_misses=perf_metrics.cache_misses,
         )
+
+        # Save params.yaml to mark run as complete
+        params_file = run_dir / "params.yaml"
+        with open(params_file, 'w') as f:
+            yaml.dump(params.to_dict(), f, default_flow_style=False)
+        print(f"Saved params to {params_file}")
 
         # Increment run counter for next experiment
         self.run_counter += 1
@@ -476,28 +603,132 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             print(f"Error parsing {json_file}: {e}")
             return default_metrics
 
-    def run_all_experiments(self) -> None:
-        """Run all experiment combinations."""
+    def _load_params_from_run(self, run_dir: Path) -> Optional[ExperimentParams]:
+        """Load experiment parameters from a run directory."""
+        params_file = run_dir / "params.yaml"
+        if not params_file.exists():
+            return None
+
+        try:
+            with open(params_file, 'r') as f:
+                data = yaml.safe_load(f)
+            return ExperimentParams.from_dict(data)
+        except Exception as e:
+            print(f"Error loading params from {params_file}: {e}")
+            return None
+
+    def _load_existing_runs(self) -> List[ExperimentParams]:
+        """Load all valid existing runs from the machine results directory."""
+        existing_runs: List[ExperimentParams] = []
+
+        if not self.results_dir.exists():
+            return existing_runs
+
+        for run_dir in self.results_dir.iterdir():
+            if run_dir.is_dir() and run_dir.name.startswith("run_"):
+                params = self._load_params_from_run(run_dir)
+                if params:
+                    existing_runs.append(params)
+
+        return existing_runs
+
+    def _clean_incomplete_runs(self) -> Tuple[int, int]:
+        """Clean up incomplete runs and return (complete_count, cleaned_count)."""
+        complete_count = 0
+        cleaned_count = 0
+
+        if not self.results_dir.exists():
+            return complete_count, cleaned_count
+
+        for run_dir in self.results_dir.iterdir():
+            if run_dir.is_dir() and run_dir.name.startswith("run_"):
+                params_file = run_dir / "params.yaml"
+
+                if params_file.exists():
+                    # Try to load params to validate completeness
+                    params = self._load_params_from_run(run_dir)
+                    if params:
+                        complete_count += 1
+                    else:
+                        # Corrupt params file - clean up
+                        print(f"Cleaning up run with corrupt params: {run_dir}")
+                        subprocess.run(["rm", "-rf", str(run_dir)], check=True)
+                        cleaned_count += 1
+                else:
+                    # No params file - incomplete run
+                    print(f"Cleaning up incomplete run: {run_dir}")
+                    subprocess.run(["rm", "-rf", str(run_dir)], check=True)
+                    cleaned_count += 1
+
+        return complete_count, cleaned_count
+
+    def _get_planned_experiments(self) -> List[ExperimentParams]:
+        """Get list of all experiments we plan to run."""
         workloads = [WorkloadType.BOTH, WorkloadType.CPU, WorkloadType.MEM]
         pinning_strategies = [PinningStrategy.NONE, PinningStrategy.SPREAD, PinningStrategy.HALF]
 
-        total_experiments = len(workloads) * len(pinning_strategies)
-        current_exp = 0
-
+        planned = []
         for workload in workloads:
             for pinning in pinning_strategies:
-                current_exp += 1
-                print(f"\nProgress: {current_exp}/{total_experiments}")
+                params = self._create_experiment_params(workload, pinning, SchedulerType.DEFAULT)
+                planned.append(params)
 
-                result = self._run_experiment(workload, pinning)
-                self.results.append(result)
+        return planned
 
-                # Save intermediate results
-                self._save_results()
+    def _get_missing_experiments(self, existing: List[ExperimentParams], planned: List[ExperimentParams]) -> List[ExperimentParams]:
+        """Get list of experiments that still need to be run."""
+        existing_set = set(existing)
+        return [params for params in planned if params not in existing_set]
 
-        print(f"\n{'='*60}")
-        print("All experiments completed!")
-        print(f"{'='*60}")
+    def run_all_experiments(self) -> None:
+        """Run all experiment combinations with incremental support."""
+        print("=" * 60)
+        print("EXPERIMENTAL RUN PREPARATION")
+        print("=" * 60)
+
+        # Step 1: Clean up incomplete runs
+        print("Cleaning up incomplete runs...")
+        complete_count, cleaned_count = self._clean_incomplete_runs()
+        print(f"Found {complete_count} complete runs, cleaned up {cleaned_count} incomplete runs")
+
+        # Step 2: Load existing valid runs
+        print("Loading existing completed runs...")
+        existing_runs = self._load_existing_runs()
+        print(f"Loaded {len(existing_runs)} existing runs")
+
+        # Step 3: Determine what experiments we plan to run
+        planned_experiments = self._get_planned_experiments()
+        print(f"Total planned experiments: {len(planned_experiments)}")
+
+        # Step 4: Find missing experiments
+        missing_experiments = self._get_missing_experiments(existing_runs, planned_experiments)
+        print(f"Missing experiments to run: {len(missing_experiments)}")
+
+        if not missing_experiments:
+            print("All experiments already completed!")
+        else:
+            print("\nMissing experiments:")
+            for params in missing_experiments:
+                print(f"  - {params.workload.value}/{params.pinning.value}/{params.scheduler.value}")
+
+        print("=" * 60)
+        print("RUNNING EXPERIMENTS")
+        print("=" * 60)
+
+        # Step 5: Run missing experiments
+        for i, params in enumerate(missing_experiments):
+            print(f"\nProgress: {i+1}/{len(missing_experiments)} (missing experiments)")
+
+            result = self._run_experiment(params.workload, params.pinning, params.scheduler)
+            self.results.append(result)
+
+            # Save intermediate results after each experiment
+            self._save_results()
+
+        if missing_experiments:
+            print(f"\n{'='*60}")
+            print(f"Completed {len(missing_experiments)} new experiments!")
+            print(f"{'='*60}")
 
         # Create/update latest symlink
         self._update_latest_symlink()
@@ -514,60 +745,93 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         latest_path.symlink_to(self.results_dir.name)
         print(f"Updated latest results symlink: {latest_path} -> {self.results_dir.name}")
 
+    def _load_result_from_run(self, run_dir: Path) -> Optional[ExperimentResult]:
+        """Load experiment result from a completed run directory."""
+        # Load params
+        params = self._load_params_from_run(run_dir)
+        if not params:
+            return None
+
+        # Parse stress-ng YAML files
+        cpu_metrics: Optional[StressMetrics] = None
+        mem_metrics: Optional[StressMetrics] = None
+
+        if params.workload in [WorkloadType.BOTH, WorkloadType.CPU]:
+            cpu_yaml = run_dir / "metrics_cpu.yaml"
+            cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
+
+        if params.workload in [WorkloadType.BOTH, WorkloadType.MEM]:
+            mem_yaml = run_dir / "metrics_mem.yaml"
+            mem_metrics = self._parse_stress_yaml(str(mem_yaml))
+
+        # Parse perf JSON output
+        perf_output_file = run_dir / "perf.json"
+        perf_metrics = self._parse_perf_json(perf_output_file)
+
+        # Create result
+        return ExperimentResult(
+            params=params,
+            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
+            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
+            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
+            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
+            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
+            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
+            instructions=perf_metrics.instructions,
+            cycles=perf_metrics.cycles,
+            cache_refs=perf_metrics.cache_refs,
+            cache_misses=perf_metrics.cache_misses,
+        )
+
+    def _load_all_results(self) -> List[ExperimentResult]:
+        """Load all experiment results from completed run directories."""
+        all_results: List[ExperimentResult] = []
+
+        if not self.results_dir.exists():
+            return all_results
+
+        for run_dir in self.results_dir.iterdir():
+            if run_dir.is_dir() and run_dir.name.startswith("run_"):
+                result = self._load_result_from_run(run_dir)
+                if result:
+                    all_results.append(result)
+
+        return all_results
+
     def _save_results(self) -> None:
-        """Save results to CSV file."""
+        """Save all results to CSV file."""
+        # Load all results from completed runs
+        all_results = self._load_all_results()
+
+        if not all_results:
+            print("No results to save!")
+            return
+
         # Convert dataclasses to dictionaries with string enum values for CSV
         results_dicts: List[Dict[str, Any]] = []
-        for result in self.results:
-            result_dict: Dict[str, Any] = {
-                'workload': result.workload.value,
-                'pinning': result.pinning.value,
-                'scheduler': result.scheduler.value,
-                'num_cores': result.num_cores,
-                'bogo_cpu': result.bogo_cpu,
-                'bogo_cpu_persec': result.bogo_cpu_persec,
-                'real_time_cpu': result.real_time_cpu,
-                'bogo_mem': result.bogo_mem,
-                'bogo_mem_persec': result.bogo_mem_persec,
-                'real_time_mem': result.real_time_mem,
-                'instructions': result.instructions,
-                'cycles': result.cycles,
-                'cache_refs': result.cache_refs,
-                'cache_misses': result.cache_misses
-            }
-            results_dicts.append(result_dict)
+        for result in all_results:
+            results_dicts.append(result.to_dict())
 
         df = pd.DataFrame(results_dicts)
         csv_file = self.results_dir / "experiment_results.csv"
         df.to_csv(csv_file, index=False)
-        print(f"Results saved to {csv_file}")
+        print(f"Results saved to {csv_file} ({len(all_results)} experiments)")
 
     def analyze_and_plot(self) -> None:
         """Analyze results and create visualization."""
-        if not self.results:
-            print("No results to analyze!")
+        # Load all results from completed runs (not just those run in this session)
+        all_results = self._load_all_results()
+
+        if not all_results:
+            print("No completed results found for analysis!")
             return
+
+        print(f"Analyzing {len(all_results)} completed experiments...")
 
         # Convert dataclasses to dictionaries for analysis
         results_dicts: List[Dict[str, Any]] = []
-        for result in self.results:
-            result_dict: Dict[str, Any] = {
-                'workload': result.workload.value,
-                'pinning': result.pinning.value,
-                'scheduler': result.scheduler.value,
-                'num_cores': result.num_cores,
-                'bogo_cpu': result.bogo_cpu,
-                'bogo_cpu_persec': result.bogo_cpu_persec,
-                'real_time_cpu': result.real_time_cpu,
-                'bogo_mem': result.bogo_mem,
-                'bogo_mem_persec': result.bogo_mem_persec,
-                'real_time_mem': result.real_time_mem,
-                'instructions': result.instructions,
-                'cycles': result.cycles,
-                'cache_refs': result.cache_refs,
-                'cache_misses': result.cache_misses
-            }
-            results_dicts.append(result_dict)
+        for result in all_results:
+            results_dicts.append(result.to_dict())
 
         df = pd.DataFrame(results_dicts)
 
