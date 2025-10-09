@@ -666,12 +666,14 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         """Get list of all experiments we plan to run."""
         workloads = [WorkloadType.BOTH, WorkloadType.CPU, WorkloadType.MEM]
         pinning_strategies = [PinningStrategy.NONE, PinningStrategy.SPREAD, PinningStrategy.HALF]
+        schedulers = [SchedulerType.DEFAULT, SchedulerType.SCX_LAVD]
 
         planned = []
-        for workload in workloads:
-            for pinning in pinning_strategies:
-                params = self._create_experiment_params(workload, pinning, SchedulerType.DEFAULT)
-                planned.append(params)
+        for scheduler in schedulers:
+            for workload in workloads:
+                for pinning in pinning_strategies:
+                    params = self._create_experiment_params(workload, pinning, scheduler)
+                    planned.append(params)
 
         return planned
 
@@ -860,7 +862,14 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
 
     def _create_plots(self, df: pd.DataFrame, max_cpu_persec: float, max_mem_persec: float) -> None:
         """Create improved stacked bar chart visualization."""
-        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+        # Get unique schedulers from the data
+        schedulers = sorted(df['scheduler'].unique())
+        num_schedulers = len(schedulers)
+        
+        fig, axes = plt.subplots(1, num_schedulers, figsize=(12 * num_schedulers, 8))
+        if num_schedulers == 1:
+            axes = [axes]  # Make it a list for consistent indexing
+            
         fig.suptitle(f'CPU Scheduling Experiment Results\n'
                      f'100% CPU = {max_cpu_persec:,.0f} ops/sec, '
                      f'100% MEM = {max_mem_persec:,.0f} ops/sec')
@@ -873,70 +882,75 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         workloads = ['both', 'cpu', 'mem']
         pinning_strategies = ['none', 'spread', 'half']
 
-        x_pos = np.arange(len(workloads))
-        width = 0.25
+        for sched_idx, scheduler in enumerate(schedulers):
+            ax = axes[sched_idx]
+            sched_df = df[df['scheduler'] == scheduler]
+            
+            x_pos = np.arange(len(workloads))
+            width = 0.25
 
-        for i, pinning in enumerate(pinning_strategies):
-            subset = df[df['pinning'] == pinning]
+            for i, pinning in enumerate(pinning_strategies):
+                subset = sched_df[sched_df['pinning'] == pinning]
 
-            cpu_values: List[float] = []
-            mem_values: List[float] = []
+                cpu_values: List[float] = []
+                mem_values: List[float] = []
 
-            for workload in workloads:
-                row = subset[subset['workload'] == workload]
-                if len(row) > 0:
-                    cpu_values.append(float(row['cpu_normalized'].iloc[0]))
-                    mem_values.append(float(row['mem_normalized'].iloc[0]))
-                else:
-                    cpu_values.append(0.0)
-                    mem_values.append(0.0)
+                for workload in workloads:
+                    row = subset[subset['workload'] == workload]
+                    if len(row) > 0:
+                        cpu_values.append(float(row['cpu_normalized'].iloc[0]))
+                        mem_values.append(float(row['mem_normalized'].iloc[0]))
+                    else:
+                        cpu_values.append(0.0)
+                        mem_values.append(0.0)
 
-            # Create stacked bars with consistent colors
-            x_offset = x_pos + i * width
-            cpu_bars = ax.bar(x_offset, cpu_values, width,
-                            label='CPU' if i == 0 else '',
-                            color=cpu_color, alpha=0.8,
-                            edgecolor='black', linewidth=0.5)
-            mem_bars = ax.bar(x_offset, mem_values, width, bottom=cpu_values,
-                            label='MEM' if i == 0 else '',
-                            color=mem_color, alpha=0.8,
-                            edgecolor='black', linewidth=0.5)
+                # Create stacked bars with consistent colors
+                x_offset = x_pos + i * width
+                cpu_bars = ax.bar(x_offset, cpu_values, width,
+                                label='CPU' if i == 0 and sched_idx == 0 else '',
+                                color=cpu_color, alpha=0.8,
+                                edgecolor='black', linewidth=0.5)
+                mem_bars = ax.bar(x_offset, mem_values, width, bottom=cpu_values,
+                                label='MEM' if i == 0 and sched_idx == 0 else '',
+                                color=mem_color, alpha=0.8,
+                                edgecolor='black', linewidth=0.5)
 
-            # Add percentage labels on bars
-            for j, (cpu_bar, mem_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values)):
-                # CPU label (middle of CPU portion)
-                if cpu_val > 5:  # Only show label if bar is tall enough
-                    ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
-                           f'{cpu_val:.0f}%', ha='center', va='center',
-                           fontweight='bold', fontsize=9, color='white')
+                # Add percentage labels on bars
+                for j, (cpu_bar, mem_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values)):
+                    # CPU label (middle of CPU portion)
+                    if cpu_val > 5:  # Only show label if bar is tall enough
+                        ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
+                               f'{cpu_val:.0f}%', ha='center', va='center',
+                               fontweight='bold', fontsize=9, color='white')
 
-                # MEM label (middle of MEM portion)
-                if mem_val > 5:  # Only show label if bar is tall enough
-                    ax.text(mem_bar.get_x() + mem_bar.get_width()/2,
-                           cpu_val + mem_val/2,
-                           f'{mem_val:.0f}%', ha='center', va='center',
-                           fontweight='bold', fontsize=9, color='white')
+                    # MEM label (middle of MEM portion)
+                    if mem_val > 5:  # Only show label if bar is tall enough
+                        ax.text(mem_bar.get_x() + mem_bar.get_width()/2,
+                               cpu_val + mem_val/2,
+                               f'{mem_val:.0f}%', ha='center', va='center',
+                               fontweight='bold', fontsize=9, color='white')
 
-            # Add combined throughput labels on top of all bars
-            for j, (cpu_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, cpu_values, mem_values)):
-                combined_val = cpu_val + mem_val
-                # Place label above the bar with some padding
-                ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 
-                       combined_val + 5,  # 5 units above the bar
-                       f'{combined_val:.0f}%', ha='center', va='bottom',
-                       fontweight='bold', fontsize=10, color='black')
+                # Add combined throughput labels on top of all bars
+                for j, (cpu_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, cpu_values, mem_values)):
+                    combined_val = cpu_val + mem_val
+                    # Place label above the bar with some padding
+                    ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 
+                           combined_val + 5,  # 5 units above the bar
+                           f'{combined_val:.0f}%', ha='center', va='bottom',
+                           fontweight='bold', fontsize=10, color='black')
 
-        # Update x-axis labels to show pinning strategies
-        workload_labels = [f'{wl}\n(none/spread/half)' for wl in workloads]
+            # Update x-axis labels to show pinning strategies
+            workload_labels = [f'{wl}\n(none/spread/half)' for wl in workloads]
 
-        ax.set_xlabel('Workload Type (Pinning Strategies Left to Right)')
-        ax.set_ylabel('Normalized Performance (%)')
-        ax.set_title('CPU Scheduling Performance by Workload and Pinning Strategy')
-        ax.set_xticks(x_pos + width)
-        ax.set_xticklabels(workload_labels)
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3, axis='y')
-        ax.set_ylim(0, 220)
+            ax.set_xlabel('Workload Type (Pinning Strategies Left to Right)')
+            ax.set_ylabel('Normalized Performance (%)')
+            ax.set_title(f'{scheduler.upper()} Scheduler')
+            ax.set_xticks(x_pos + width)
+            ax.set_xticklabels(workload_labels)
+            if sched_idx == 0:  # Only show legend on first subplot
+                ax.legend(loc='upper right')
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.set_ylim(0, 220)
 
         plt.tight_layout()
 
