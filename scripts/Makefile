@@ -61,6 +61,12 @@ update_deps: ## Update dependencies and regenerate lock file
 install_deps_dev: update_deps install_deps ## Update and install dependencies (for development)
 	@echo "✅ Python environment ready at $(VENV_DIR)"
 
+.PHONY: validate
+validate: check_deps typecheck quick_test strip_whitespace ## Run all validation checks before commit
+	@echo ""
+	@echo "✅ All validation checks passed! Ready to commit."
+	@echo ""
+
 .PHONY: full_run
 full_run: check_deps clean experiment analyze ## Run complete experiment: setup → experiment → analysis
 	@echo ""
@@ -101,6 +107,12 @@ typecheck-vscode: ## Run pyright type checking (matches VS Code exactly)
 typecheck-mypy: ## Run only mypy type checking
 	@echo "🔍 Running mypy type checking..."
 	$(PYTHON) -m mypy --strict $(EXPERIMENT_SCRIPT) $(ANALYSIS_SCRIPT) test_experiment.py
+
+.PHONY: strip_whitespace
+strip_whitespace: ## Remove trailing whitespace from all Python files
+	@echo "✂️  Removing trailing whitespace from Python files..."
+	@find . -name "*.py" -exec sed -i 's/[[:space:]]*$$//' {} \;
+	@echo "✅ Trailing whitespace removed from all Python files"
 
 .PHONY: check_deps
 check_deps: ## Check if all dependencies are available

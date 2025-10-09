@@ -635,7 +635,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
     def _clean_incomplete_runs(self) -> Tuple[int, int]:
         """Clean up incomplete runs and return (complete_count, cleaned_count)."""
         import re
-        
+
         complete_count = 0
         cleaned_count = 0
         max_run_counter = 0
@@ -650,7 +650,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                 if match:
                     run_counter = int(match.group(1))
                     max_run_counter = max(max_run_counter, run_counter)
-                
+
                 params_file = run_dir / "params.yaml"
 
                 if params_file.exists():
@@ -879,11 +879,11 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         # Get unique schedulers from the data
         schedulers = sorted(df['scheduler'].unique())
         num_schedulers = len(schedulers)
-        
+
         fig, axes = plt.subplots(1, num_schedulers, figsize=(12 * num_schedulers, 8))
         if num_schedulers == 1:
             axes = [axes]  # Make it a list for consistent indexing
-            
+
         fig.suptitle(f'CPU Scheduling Experiment Results\n'
                      f'100% CPU = {max_cpu_persec:,.0f} ops/sec, '
                      f'100% MEM = {max_mem_persec:,.0f} ops/sec')
@@ -899,7 +899,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         for sched_idx, scheduler in enumerate(schedulers):
             ax = axes[sched_idx]
             sched_df = df[df['scheduler'] == scheduler]
-            
+
             x_pos = np.arange(len(workloads))
             width = 0.25
 
@@ -948,7 +948,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                 for j, (cpu_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, cpu_values, mem_values)):
                     combined_val = cpu_val + mem_val
                     # Place label above the bar with some padding
-                    ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 
+                    ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2,
                            combined_val + 5,  # 5 units above the bar
                            f'{combined_val:.0f}%', ha='center', va='bottom',
                            fontweight='bold', fontsize=10, color='black')

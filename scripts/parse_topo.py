@@ -2,7 +2,7 @@
 """
 Parse lstopo XML output and represent CPU topology as strongly typed Python classes.
 
-This script parses the XML output from `lstopo --output-format xml` or `hwloc-ls --output-format xml` 
+This script parses the XML output from `lstopo --output-format xml` or `hwloc-ls --output-format xml`
 and creates a hierarchical representation of the CPU topology.
 """
 
