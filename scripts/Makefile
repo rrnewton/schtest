@@ -2,8 +2,8 @@
 # ===================================
 
 # Configuration
-PYTHON := ../.venv/bin/python
 VENV_DIR := ../.venv
+PYTHON := $(VENV_DIR)/bin/python
 REQUIREMENTS_IN := requirements.in
 REQUIREMENTS_LOCK := requirements.txt
 RESULTS_DIR := results
@@ -96,21 +96,24 @@ quick_test: check_deps ## Run a quick 2-second test
 	$(PYTHON) test_experiment.py
 
 .PHONY: unittest
-unittest:
+unittest: pytest_output
 	@echo "Running tests with coverage..."
-	../.venv/bin/python -m pytest ./tests/ --cov=parse_topo --cov-report=html --cov-report=term
+	cd pytest_output && ../$(PYTHON) -m pytest ../tests/ \
+		--cov=parse_topo --cov-report=html --cov-report=term
 
 .PHONY: unittest-ci
 unittest-ci: ## Run all unit tests for CI
 	@echo "🧪 Running all unit tests in CI mode..."
-	pwd -P
-	$(PYTHON) -m pytest tests/ \
+	cd pytest_output && ../$(PYTHON) -m pytest ../tests/ \
 		--junitxml=test-results.xml \
 		--cov=parse_topo \
 		--cov=mem_balance \
 		--cov-report=xml \
 		--cov-report=term \
 		-v
+
+pytest_output:
+	mkdir -p $@
 
 .PHONY: typecheck
 typecheck: typecheck-vscode typecheck-mypy
@@ -148,8 +151,13 @@ check_deps: ## Check if all dependencies are available
 .PHONY: clean
 clean: ## Clean up all generated files
 	@echo "🧹 Cleaning up..."
-	rm -rf __pycache__ .mypy_cache
+	rm -rf __pycache__ tests/__pycache__ .mypy_cache pytest_output .pytest_cache
 	@echo "✅ Cleanup complete!"
+
+.PHONY: distclean
+distclean: clean
+	rm -rf ./results
+	@echo "✅ Deep clean including benchmark results."
 
 .PHONY: view_results
 view_results: $(PLOT_FILE) ## View the results plot
