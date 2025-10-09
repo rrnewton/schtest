@@ -895,10 +895,12 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             x_offset = x_pos + i * width
             cpu_bars = ax.bar(x_offset, cpu_values, width,
                             label='CPU' if i == 0 else '',
-                            color=cpu_color, alpha=0.8)
+                            color=cpu_color, alpha=0.8,
+                            edgecolor='black', linewidth=0.5)
             mem_bars = ax.bar(x_offset, mem_values, width, bottom=cpu_values,
                             label='MEM' if i == 0 else '',
-                            color=mem_color, alpha=0.8)
+                            color=mem_color, alpha=0.8,
+                            edgecolor='black', linewidth=0.5)
 
             # Add percentage labels on bars
             for j, (cpu_bar, mem_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values)):
