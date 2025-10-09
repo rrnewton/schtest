@@ -31,3 +31,26 @@ jobs:
 
       - name: Test
         run: cargo test -- --skip test_process_iterations
+
+  python_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y stress-ng
+          # Note: perf tools may not work properly in CI containers
+          # but we'll install them anyway for completeness
+          sudo apt-get install -y linux-tools-common linux-tools-generic || true
+
+      - name: Run Python tests
+        run: |
+          cd scripts
+          make install_deps typecheck quick_test unittest-ci

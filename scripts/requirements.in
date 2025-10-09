@@ -12,3 +12,8 @@ pandas-stubs
 
 # Development tools
 pip-tools
+
+# Testing dependencies
+pytest
+pytest-cov
+pytest-xdist

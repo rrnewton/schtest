@@ -62,7 +62,7 @@ install_deps_dev: update_deps install_deps ## Update and install dependencies (f
 	@echo "✅ Python environment ready at $(VENV_DIR)"
 
 .PHONY: validate
-validate: check_deps typecheck quick_test strip_whitespace ## Run all validation checks before commit
+validate: strip_whitespace check_deps typecheck quick_test unittest ## Run all validation checks before commit
 	@echo ""
 	@echo "✅ All validation checks passed! Ready to commit."
 	@echo ""
@@ -94,6 +94,22 @@ analyze: $(ANALYSIS_FILE) ## Run detailed analysis of existing results
 quick_test: check_deps ## Run a quick 2-second test
 	@echo "🚀 Running quick test..."
 	$(PYTHON) test_experiment.py
+
+.PHONY: unittest
+unittest:
+	@echo "Running tests with coverage..."
+	../.venv/bin/python -m pytest ./tests/ --cov=parse_topo --cov-report=html --cov-report=term
+
+.PHONY: unittest-ci
+unittest-ci: ## Run all unit tests for CI
+	@echo "🧪 Running all unit tests in CI mode..."
+	$(PYTHON) -m pytest test_*.py tests/ \
+		--junitxml=test-results.xml \
+		--cov=parse_topo \
+		--cov=mem_balance \
+		--cov-report=xml \
+		--cov-report=term \
+		-v
 
 .PHONY: typecheck
 typecheck: typecheck-vscode typecheck-mypy
