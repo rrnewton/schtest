@@ -102,7 +102,7 @@ unittest: pytest_output
 		--cov=parse_topo --cov-report=html --cov-report=term
 
 .PHONY: unittest-ci
-unittest-ci: ## Run all unit tests for CI
+unittest-ci: pytest_output
 	@echo "🧪 Running all unit tests in CI mode..."
 	cd pytest_output && ../$(PYTHON) -m pytest ../tests/ \
 		--junitxml=test-results.xml \

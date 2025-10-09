@@ -169,6 +169,8 @@ class SchedStartMonitor:
     def __init__(self, scheduler_name: str) -> None:
         """Start dmesg monitoring for the given scheduler."""
         self.scheduler_name = scheduler_name
+        self.dmesg_lines: List[str] = []  # Buffer to store recent dmesg lines
+        self.scheduler_proc: Optional[subprocess.Popen[str]] = None
         self.dmesg_proc = subprocess.Popen(
             ["sudo", "dmesg", "-W"],
             stdout=subprocess.PIPE,
@@ -201,14 +203,103 @@ class SchedStartMonitor:
             if ready and self.dmesg_proc.stdout:
                 line = self.dmesg_proc.stdout.readline()
                 if line:
-                    print(f"dmesg: {line.strip()}")  # Debug output
+                    stripped = line.strip()
+                    print(f"dmesg: {stripped}")  # Debug output
+                    # Keep last 10 lines
+                    self.dmesg_lines.append(stripped)
+                    if len(self.dmesg_lines) > 10:
+                        self.dmesg_lines.pop(0)
                     # Look for scheduler enabled message
                     if f'sched_ext: BPF scheduler "{self.scheduler_name}_' in line and "enabled" in line:
                         print(f"Scheduler {self.scheduler_name} enabled successfully")
                         time.sleep(1)  # Give it a moment to fully initialize
                         return
 
+        # Timeout occurred - print debug information
+        self._print_debug_info()
         raise RuntimeError(f"Timeout waiting for {self.scheduler_name} scheduler to be enabled")
+
+    def _print_debug_info(self) -> None:
+        """Print debug information when scheduler fails to start."""
+        print("\n" + "=" * 60)
+        print("SCHEDULER STARTUP TIMEOUT - DEBUG INFORMATION")
+        print("=" * 60)
+
+        print("\nLast 10 dmesg lines:")
+        if self.dmesg_lines:
+            for line in self.dmesg_lines:
+                print(f"  {line}")
+        else:
+            print("  (no dmesg output captured)")
+
+        if self.scheduler_proc:
+            print("\nScheduler process stdout (last 10 lines):")
+            if self.scheduler_proc.stdout:
+                try:
+                    # Try to read any pending output
+                    import fcntl
+                    import os
+                    fd = self.scheduler_proc.stdout.fileno()
+                    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+                    stdout_lines = []
+                    try:
+                        while True:
+                            line = self.scheduler_proc.stdout.readline()
+                            if not line:
+                                break
+                            stdout_lines.append(line.strip())
+                    except:
+                        pass
+
+                    if stdout_lines:
+                        for line in stdout_lines[-10:]:
+                            print(f"  {line}")
+                    else:
+                        print("  (no stdout output)")
+                except Exception as e:
+                    print(f"  (failed to read stdout: {e})")
+            else:
+                print("  (stdout not captured)")
+
+            print("\nScheduler process stderr (last 10 lines):")
+            if self.scheduler_proc.stderr:
+                try:
+                    # Try to read any pending output
+                    import fcntl
+                    import os
+                    fd = self.scheduler_proc.stderr.fileno()
+                    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+                    stderr_lines = []
+                    try:
+                        while True:
+                            line = self.scheduler_proc.stderr.readline()
+                            if not line:
+                                break
+                            stderr_lines.append(line.strip())
+                    except:
+                        pass
+
+                    if stderr_lines:
+                        for line in stderr_lines[-10:]:
+                            print(f"  {line}")
+                    else:
+                        print("  (no stderr output)")
+                except Exception as e:
+                    print(f"  (failed to read stderr: {e})")
+            else:
+                print("  (stderr not captured)")
+
+            print("\nScheduler process status:")
+            if self.scheduler_proc.poll() is None:
+                print("  Process is still running")
+            else:
+                print(f"  Process exited with code: {self.scheduler_proc.poll()}")
+
+        print("=" * 60 + "\n")
 
     def teardown(self) -> None:
         """Clean up dmesg monitoring process."""
@@ -306,6 +397,9 @@ class ExperimentRunner:
                     stderr=subprocess.PIPE,
                     text=True
                 )
+
+                # Give the monitor access to the scheduler process for debugging
+                monitor.scheduler_proc = proc
 
                 # Wait for scheduler to be enabled
                 monitor.wait_for_sched_enabled()
