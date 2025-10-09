@@ -169,10 +169,14 @@ fn come_together() -> Result<()> {
                 for spinner in spinner_set {
                     let cpu = spinner.last_cpu() as i32;
                     let local_complex = logical_to_physical[&cpu];
-                    if complex.is_none() {
-                        complex = Some(local_complex);
-                    } else if complex.unwrap() != local_complex {
-                        mismatches += 1;
+                    match complex {
+                        Some(c) if c != local_complex => {
+                            mismatches += 1;
+                        }
+                        Some(_) => {}
+                        None => {
+                            complex = Some(local_complex);
+                        }
                     }
                     total += 1;
                 }
