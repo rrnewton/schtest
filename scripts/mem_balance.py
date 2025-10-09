@@ -854,7 +854,9 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         # Print summary table
         print("\nSummary Results:")
         summary_cols = ['workload', 'pinning', 'cpu_normalized', 'mem_normalized', 'combined_tput']
-        print(df[summary_cols].round(1).to_string(index=False))
+        # Sort by workload then pinning for consistent display
+        df_sorted = df.sort_values(['workload', 'pinning'])
+        print(df_sorted[summary_cols].round(1).to_string(index=False))
 
     def _create_plots(self, df: pd.DataFrame, max_cpu_persec: float, max_mem_persec: float) -> None:
         """Create improved stacked bar chart visualization."""
