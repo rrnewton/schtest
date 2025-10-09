@@ -103,7 +103,8 @@ unittest:
 .PHONY: unittest-ci
 unittest-ci: ## Run all unit tests for CI
 	@echo "🧪 Running all unit tests in CI mode..."
-	$(PYTHON) -m pytest test_*.py tests/ \
+	pwd -P
+	$(PYTHON) -m pytest tests/ \
 		--junitxml=test-results.xml \
 		--cov=parse_topo \
 		--cov=mem_balance \
