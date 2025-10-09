@@ -93,11 +93,17 @@ class SchedMonitor:
             self._cleanup_dmesg()
 
     def stop(self) -> None:
-        """Stop the scheduler process."""
+        """Stop the scheduler process.
+
+        Sends SIGINT to allow the scheduler to cleanly unload itself from
+        the kernel (same as Ctrl-C behavior).
+        """
         if self.scheduler_proc is None:
             return
 
         print("Stopping scheduler...")
+
+        # Stop the scheduler process (sends SIGINT first, then SIGTERM, then SIGKILL)
         self._stop_process(self.scheduler_proc)
         self.scheduler_proc = None
         print("Scheduler stopped")
@@ -245,19 +251,39 @@ class SchedMonitor:
         print("=" * 60 + "\n")
 
     def _stop_process(self, proc: subprocess.Popen[str]) -> None:
-        """Stop a process gracefully, with fallback to kill."""
-        proc.terminate()
+        """Stop a process gracefully, with fallback to kill.
+
+        Sends SIGINT first (like Ctrl-C) to allow the scheduler to cleanly
+        unload itself from the kernel, then falls back to SIGTERM and SIGKILL.
+        """
+        import signal
+
+        # First try SIGINT (like Ctrl-C) - this allows scheduler to unload cleanly
+        print("  Sending SIGINT (Ctrl-C equivalent)...")
+        proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=10)
-            print("  Process stopped gracefully")
+            print("  Process stopped gracefully with SIGINT")
+            return
+        except subprocess.TimeoutExpired:
+            print("  Process didn't respond to SIGINT, trying SIGTERM...")
+
+        # Fall back to SIGTERM
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+            print("  Process stopped with SIGTERM")
+            return
         except subprocess.TimeoutExpired:
             print("  Process didn't terminate gracefully, killing...")
-            proc.kill()
-            try:
-                proc.wait(timeout=5)
-                print("  Process killed successfully")
-            except subprocess.TimeoutExpired:
-                print("  Warning: Process may still be running")
+
+        # Last resort: SIGKILL
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+            print("  Process killed successfully")
+        except subprocess.TimeoutExpired:
+            print("  Warning: Process may still be running")
 
     def _cleanup_dmesg(self) -> None:
         """Clean up dmesg monitoring process."""
