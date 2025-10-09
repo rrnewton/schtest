@@ -5,6 +5,7 @@ Runs stress-ng workloads with different thread pinning strategies
 and analyzes performance metrics.
 """
 
+import functools
 import os
 import subprocess
 import json
@@ -30,13 +31,18 @@ RESULTS_DIR = Path("./results")
 STRESS_SCRIPT = "./stress.sh"
 SCX_DIR = Path("../../scx")
 
-# Type Definitions
+@functools.total_ordering
 class WorkloadType(Enum):
-    """Enum for workload types"""
     BOTH = "both"
     CPU = "cpu"
     MEM = "mem"
 
+    # Custom ordering to do the baseline one-workload tests first.
+    def __lt__(self, other):
+        if self.__class__ is other.__class__:
+            order = [WorkloadType.CPU, WorkloadType.MEM, WorkloadType.BOTH]
+            return order.index(self) < order.index(other)
+        return NotImplemented
 class PinningStrategy(Enum):
     """Enum for thread pinning strategies"""
     NONE = "none"
@@ -332,10 +338,14 @@ class ExperimentRunner:
         proc.terminate()
         try:
             proc.wait(timeout=10)
-        except subprocess.CalledProcessError:
+        except subprocess.TimeoutExpired:
             print("Scheduler didn't terminate gracefully, killing...")
             proc.kill()
-            proc.wait()
+            try:
+                proc.wait(timeout=5)
+                print("Scheduler killed successfully")
+            except subprocess.TimeoutExpired:
+                print("Warning: Scheduler process may still be running")
         print("Scheduler stopped")
 
     def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
@@ -649,7 +659,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                 match = re.match(r'run_(\d+)_', run_dir.name)
                 if match:
                     run_counter = int(match.group(1))
-                    max_run_counter = max(max_run_counter, run_counter)
+                else:
+                    run_counter = 0
 
                 params_file = run_dir / "params.yaml"
 
@@ -658,6 +669,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                     params = self._load_params_from_run(run_dir)
                     if params:
                         complete_count += 1
+                        max_run_counter = max(max_run_counter, run_counter)
                     else:
                         # Corrupt params file - clean up
                         print(f"Cleaning up run with corrupt params: {run_dir}")
