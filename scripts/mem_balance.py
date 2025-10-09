@@ -915,6 +915,15 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                            f'{mem_val:.0f}%', ha='center', va='center',
                            fontweight='bold', fontsize=9, color='white')
 
+            # Add combined throughput labels on top of all bars
+            for j, (cpu_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, cpu_values, mem_values)):
+                combined_val = cpu_val + mem_val
+                # Place label above the bar with some padding
+                ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 
+                       combined_val + 5,  # 5 units above the bar
+                       f'{combined_val:.0f}%', ha='center', va='bottom',
+                       fontweight='bold', fontsize=10, color='black')
+
         # Update x-axis labels to show pinning strategies
         workload_labels = [f'{wl}\n(none/spread/half)' for wl in workloads]
 
