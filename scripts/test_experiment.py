@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, '/home/newton/playground/schtest/scripts')
 
 # Import our main script
-from mem_balance import ExperimentRunner, WorkloadType, PinningStrategy, SchedulerType
+from mem_balance import ExperimentRunner, WorkloadType, PinningStrategy
+from sched_monitor import SchedulerType
 
 # Create a test runner with shorter duration
 class TestRunner(ExperimentRunner):

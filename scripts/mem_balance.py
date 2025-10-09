@@ -15,8 +15,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import argparse
 import re
-import time
-import select
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
@@ -24,6 +22,8 @@ from dataclasses import dataclass
 
 # Import topology parser
 from parse_topo import parse_topology, Machine
+# Import scheduler monitor
+from sched_monitor import SchedMonitor, SchedulerType
 
 # Configuration
 EXPERIMENT_DURATION = 6  # seconds
@@ -38,21 +38,17 @@ class WorkloadType(Enum):
     MEM = "mem"
 
     # Custom ordering to do the baseline one-workload tests first.
-    def __lt__(self, other):
-        if self.__class__ is other.__class__:
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, WorkloadType):
             order = [WorkloadType.CPU, WorkloadType.MEM, WorkloadType.BOTH]
             return order.index(self) < order.index(other)
         return NotImplemented
+
 class PinningStrategy(Enum):
     """Enum for thread pinning strategies"""
     NONE = "none"
     SPREAD = "spread"
     HALF = "half"
-
-class SchedulerType(Enum):
-    """Enum for scheduler types"""
-    DEFAULT = "default"
-    SCX_LAVD = "scx_lavd"
 
 @dataclass
 class ExperimentParams:
@@ -163,154 +159,6 @@ class ExperimentResult:
         })
         return result
 
-class SchedStartMonitor:
-    """Monitor dmesg for scheduler enabled messages."""
-
-    def __init__(self, scheduler_name: str) -> None:
-        """Start dmesg monitoring for the given scheduler."""
-        self.scheduler_name = scheduler_name
-        self.dmesg_lines: List[str] = []  # Buffer to store recent dmesg lines
-        self.scheduler_proc: Optional[subprocess.Popen[str]] = None
-        self.dmesg_proc = subprocess.Popen(
-            ["sudo", "dmesg", "-W"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-
-        if self.dmesg_proc.stdout is None:
-            self.teardown()
-            raise RuntimeError("Failed to start dmesg monitoring")
-
-        print(f"Started dmesg monitoring for {scheduler_name} scheduler...")
-
-    def wait_for_sched_enabled(self, timeout: float = 30.0) -> None:
-        """Wait for scheduler enabled message."""
-        print(f"Waiting for {self.scheduler_name} scheduler to be enabled...")
-
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            if self.dmesg_proc.poll() is not None:
-                # dmesg process died
-                raise RuntimeError("dmesg monitoring process died")
-
-            # Read with timeout to avoid blocking forever
-            ready, _, _ = select.select([self.dmesg_proc.stdout], [], [], 1.0)
-
-            if ready and self.dmesg_proc.stdout:
-                line = self.dmesg_proc.stdout.readline()
-                if line:
-                    stripped = line.strip()
-                    print(f"dmesg: {stripped}")  # Debug output
-                    # Keep last 10 lines
-                    self.dmesg_lines.append(stripped)
-                    if len(self.dmesg_lines) > 10:
-                        self.dmesg_lines.pop(0)
-                    # Look for scheduler enabled message
-                    if f'sched_ext: BPF scheduler "{self.scheduler_name}_' in line and "enabled" in line:
-                        print(f"Scheduler {self.scheduler_name} enabled successfully")
-                        time.sleep(1)  # Give it a moment to fully initialize
-                        return
-
-        # Timeout occurred - print debug information
-        self._print_debug_info()
-        raise RuntimeError(f"Timeout waiting for {self.scheduler_name} scheduler to be enabled")
-
-    def _print_debug_info(self) -> None:
-        """Print debug information when scheduler fails to start."""
-        print("\n" + "=" * 60)
-        print("SCHEDULER STARTUP TIMEOUT - DEBUG INFORMATION")
-        print("=" * 60)
-
-        print("\nLast 10 dmesg lines:")
-        if self.dmesg_lines:
-            for line in self.dmesg_lines:
-                print(f"  {line}")
-        else:
-            print("  (no dmesg output captured)")
-
-        if self.scheduler_proc:
-            print("\nScheduler process stdout (last 10 lines):")
-            if self.scheduler_proc.stdout:
-                try:
-                    # Try to read any pending output
-                    import fcntl
-                    import os
-                    fd = self.scheduler_proc.stdout.fileno()
-                    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-                    stdout_lines = []
-                    try:
-                        while True:
-                            line = self.scheduler_proc.stdout.readline()
-                            if not line:
-                                break
-                            stdout_lines.append(line.strip())
-                    except:
-                        pass
-
-                    if stdout_lines:
-                        for line in stdout_lines[-10:]:
-                            print(f"  {line}")
-                    else:
-                        print("  (no stdout output)")
-                except Exception as e:
-                    print(f"  (failed to read stdout: {e})")
-            else:
-                print("  (stdout not captured)")
-
-            print("\nScheduler process stderr (last 10 lines):")
-            if self.scheduler_proc.stderr:
-                try:
-                    # Try to read any pending output
-                    import fcntl
-                    import os
-                    fd = self.scheduler_proc.stderr.fileno()
-                    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-                    stderr_lines = []
-                    try:
-                        while True:
-                            line = self.scheduler_proc.stderr.readline()
-                            if not line:
-                                break
-                            stderr_lines.append(line.strip())
-                    except:
-                        pass
-
-                    if stderr_lines:
-                        for line in stderr_lines[-10:]:
-                            print(f"  {line}")
-                    else:
-                        print("  (no stderr output)")
-                except Exception as e:
-                    print(f"  (failed to read stderr: {e})")
-            else:
-                print("  (stderr not captured)")
-
-            print("\nScheduler process status:")
-            if self.scheduler_proc.poll() is None:
-                print("  Process is still running")
-            else:
-                print(f"  Process exited with code: {self.scheduler_proc.poll()}")
-
-        print("=" * 60 + "\n")
-
-    def teardown(self) -> None:
-        """Clean up dmesg monitoring process."""
-        if hasattr(self, 'dmesg_proc') and self.dmesg_proc:
-            self.dmesg_proc.terminate()
-            try:
-                self.dmesg_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.dmesg_proc.kill()
-                self.dmesg_proc.wait()
-
 class ExperimentRunner:
     def __init__(self, machine_name: Optional[str] = None) -> None:
         self.num_cores = self._get_num_cores()
@@ -326,6 +174,7 @@ class ExperimentRunner:
         self.results_dir = RESULTS_DIR / self.machine_name
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.run_counter = 1
+        self.sched_monitor: Optional[SchedMonitor] = None
 
     def _get_num_cores(self) -> int:
         """Get number of physical cores on the system."""
@@ -376,42 +225,11 @@ class ExperimentRunner:
 
         if scheduler == SchedulerType.SCX_LAVD:
             scheduler_path = SCX_DIR / "target/release/scx_lavd"
-            if not scheduler_path.exists():
-                raise FileNotFoundError(f"Scheduler not found: {scheduler_path}")
 
-            print(f"Starting scheduler: {scheduler_path}")
-
-            # Start dmesg monitoring first
-            scheduler_name_map = {
-                SchedulerType.SCX_LAVD: "lavd"
-            }
-            scheduler_name = scheduler_name_map[scheduler]
-
-            monitor = SchedStartMonitor(scheduler_name)
-
-            try:
-                # Start the scheduler process with sudo
-                proc = subprocess.Popen(
-                    ["sudo", str(scheduler_path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-
-                # Give the monitor access to the scheduler process for debugging
-                monitor.scheduler_proc = proc
-
-                # Wait for scheduler to be enabled
-                monitor.wait_for_sched_enabled()
-                return proc
-
-            except Exception:
-                # Clean up monitor if scheduler startup fails
-                monitor.teardown()
-                raise
-            finally:
-                # Always clean up the monitor
-                monitor.teardown()
+            # Create and use SchedMonitor
+            self.sched_monitor = SchedMonitor(scheduler, scheduler_path)
+            proc = self.sched_monitor.start()
+            return proc
 
         raise ValueError(f"Unknown scheduler: {scheduler}")
 
@@ -425,22 +243,9 @@ class ExperimentRunner:
 
     def _stop_scheduler(self, proc: Optional[subprocess.Popen[str]]) -> None:
         """Stop a scheduler process."""
-        if proc is None:
-            return
-
-        print("Stopping scheduler...")
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            print("Scheduler didn't terminate gracefully, killing...")
-            proc.kill()
-            try:
-                proc.wait(timeout=5)
-                print("Scheduler killed successfully")
-            except subprocess.TimeoutExpired:
-                print("Warning: Scheduler process may still be running")
-        print("Scheduler stopped")
+        if self.sched_monitor:
+            self.sched_monitor.stop()
+            self.sched_monitor = None
 
     def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
                              scheduler: SchedulerType, run_dir: Path) -> str:
