@@ -46,7 +46,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y stress-ng
+          sudo apt-get install -y stress-ng hwloc
           # Note: perf tools may not work properly in CI containers
           # but we'll install them anyway for completeness
           sudo apt-get install -y linux-tools-common linux-tools-generic || true
@@ -54,4 +54,5 @@ jobs:
       - name: Run Python tests
         run: |
           cd scripts
-          make install_deps typecheck quick_test unittest-ci
+          make install_deps typecheck unittest-ci
+          make quick_test # e2e test
