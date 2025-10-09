@@ -54,5 +54,7 @@ jobs:
       - name: Run Python tests
         run: |
           cd scripts
-          make install_deps typecheck unittest-ci
+          make install_deps typecheck
+          lstopo
+          make unittest-ci
           make quick_test # e2e test
