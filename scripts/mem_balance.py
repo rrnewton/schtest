@@ -634,14 +634,23 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
 
     def _clean_incomplete_runs(self) -> Tuple[int, int]:
         """Clean up incomplete runs and return (complete_count, cleaned_count)."""
+        import re
+        
         complete_count = 0
         cleaned_count = 0
+        max_run_counter = 0
 
         if not self.results_dir.exists():
             return complete_count, cleaned_count
 
         for run_dir in self.results_dir.iterdir():
             if run_dir.is_dir() and run_dir.name.startswith("run_"):
+                # Extract run counter from directory name (e.g., run_001_config -> 1)
+                match = re.match(r'run_(\d+)_', run_dir.name)
+                if match:
+                    run_counter = int(match.group(1))
+                    max_run_counter = max(max_run_counter, run_counter)
+                
                 params_file = run_dir / "params.yaml"
 
                 if params_file.exists():
@@ -659,6 +668,11 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                     print(f"Cleaning up incomplete run: {run_dir}")
                     subprocess.run(["rm", "-rf", str(run_dir)], check=True)
                     cleaned_count += 1
+
+        # Initialize run counter to avoid duplicates
+        self.run_counter = max_run_counter + 1
+        if max_run_counter > 0:
+            print(f"Initialized run counter to {self.run_counter} (max observed: {max_run_counter})")
 
         return complete_count, cleaned_count
 
