@@ -31,14 +31,17 @@ class DmesgMonitor:
         self.dmesg_lines: List[str] = []
         self.dmesg_proc: Optional[subprocess.Popen[str]] = None
 
-        # Start dmesg monitoring
+        # Start dmesg monitoring with process group
+        # Using start_new_session=True makes the process a session leader
+        # so we can kill the entire process tree
         self.dmesg_proc = subprocess.Popen(
             ["sudo", "dmesg", "-W"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            universal_newlines=True
+            universal_newlines=True,
+            start_new_session=True
         )
 
         if self.dmesg_proc.stdout is None:
@@ -140,17 +143,27 @@ class DmesgMonitor:
         return list(self.dmesg_lines)
 
     def cleanup(self) -> None:
-        """Clean up dmesg monitoring process."""
+        """Clean up dmesg monitoring process and its children."""
         if self.dmesg_proc:
-            self.dmesg_proc.terminate()
+            import os
+            import signal
+            
+            # Kill the entire process group (sudo + dmesg)
             try:
-                self.dmesg_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.dmesg_proc.kill()
-                try:
-                    self.dmesg_proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
+                if self.dmesg_proc.poll() is None:  # Process still running
+                    os.killpg(os.getpgid(self.dmesg_proc.pid), signal.SIGTERM)
+                    try:
+                        self.dmesg_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(os.getpgid(self.dmesg_proc.pid), signal.SIGKILL)
+                        try:
+                            self.dmesg_proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+            except (ProcessLookupError, PermissionError):
+                # Process or group already gone
+                pass
+            
             self.dmesg_proc = None
 
 
@@ -205,11 +218,14 @@ class SchedMonitor:
 
         try:
             # Start the scheduler process with sudo
+            # Using start_new_session=True makes the process a session leader
+            # so we can kill the entire process tree (sudo + actual scheduler)
             self.scheduler_proc = subprocess.Popen(
                 ["sudo", str(self.scheduler_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                start_new_session=True
             )
 
             # Wait for scheduler to be enabled
@@ -348,36 +364,62 @@ class SchedMonitor:
         print("=" * 60 + "\n")
 
     def _stop_process(self, proc: subprocess.Popen[str]) -> None:
-        """Stop a process gracefully, with fallback to kill.
+        """Stop a process and its children gracefully, with fallback to kill.
 
-        Sends SIGINT first (like Ctrl-C) to allow the scheduler to cleanly
-        unload itself from the kernel, then falls back to SIGTERM and SIGKILL.
+        Sends SIGINT first (like Ctrl-C) to the process group to allow the scheduler 
+        to cleanly unload itself from the kernel, then falls back to SIGTERM and SIGKILL.
+        
+        Since we start processes with sudo, we need to kill the entire process group
+        (sudo + the actual scheduler) not just the sudo wrapper.
         """
         import signal
+        import os
 
-        # First try SIGINT (like Ctrl-C) - this allows scheduler to unload cleanly
-        print("  Sending SIGINT (Ctrl-C equivalent)...")
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=10)
-            print("  Process stopped gracefully with SIGINT")
+        if proc.poll() is not None:
+            # Process already exited
+            print("  Process already exited")
             return
-        except subprocess.TimeoutExpired:
-            print("  Process didn't respond to SIGINT, trying SIGTERM...")
 
-        # Fall back to SIGTERM
-        proc.terminate()
         try:
-            proc.wait(timeout=5)
-            print("  Process stopped with SIGTERM")
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            print("  Process or process group not found")
             return
-        except subprocess.TimeoutExpired:
-            print("  Process didn't terminate gracefully, killing...")
 
-        # Last resort: SIGKILL
-        proc.kill()
+        # First try SIGINT (like Ctrl-C) to the process group - this allows scheduler to unload cleanly
+        print("  Sending SIGINT to process group (Ctrl-C equivalent)...")
         try:
-            proc.wait(timeout=5)
-            print("  Process killed successfully")
-        except subprocess.TimeoutExpired:
-            print("  Warning: Process may still be running")
+            os.killpg(pgid, signal.SIGINT)
+            try:
+                proc.wait(timeout=10)
+                print("  Process stopped gracefully with SIGINT")
+                return
+            except subprocess.TimeoutExpired:
+                print("  Process didn't respond to SIGINT, trying SIGTERM...")
+        except (ProcessLookupError, PermissionError):
+            print("  Process group already gone")
+            return
+
+        # Fall back to SIGTERM for the process group
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+                print("  Process stopped with SIGTERM")
+                return
+            except subprocess.TimeoutExpired:
+                print("  Process didn't terminate gracefully, killing...")
+        except (ProcessLookupError, PermissionError):
+            print("  Process group already gone")
+            return
+
+        # Last resort: SIGKILL to process group
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            try:
+                proc.wait(timeout=5)
+                print("  Process killed successfully")
+            except subprocess.TimeoutExpired:
+                print("  Warning: Process may still be running")
+        except (ProcessLookupError, PermissionError):
+            print("  Process group already gone")
