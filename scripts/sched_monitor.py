@@ -18,6 +18,142 @@ class SchedulerType(Enum):
     SCX_LAVD = "scx_lavd"
 
 
+class DmesgMonitor:
+    """Monitor dmesg for scheduler-related kernel messages."""
+
+    def __init__(self, scheduler_name: str) -> None:
+        """Start dmesg monitoring for the given scheduler.
+
+        Args:
+            scheduler_name: Name of the scheduler to monitor (e.g., "lavd")
+        """
+        self.scheduler_name = scheduler_name
+        self.dmesg_lines: List[str] = []
+        self.dmesg_proc: Optional[subprocess.Popen[str]] = None
+
+        # Start dmesg monitoring
+        self.dmesg_proc = subprocess.Popen(
+            ["sudo", "dmesg", "-W"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        if self.dmesg_proc.stdout is None:
+            self.cleanup()
+            raise RuntimeError("Failed to start dmesg monitoring")
+
+        print(f"Started dmesg monitoring for {scheduler_name} scheduler...")
+
+    def wait_for_enabled(self, timeout: float = 30.0) -> None:
+        """Wait for scheduler enabled message in dmesg.
+
+        Args:
+            timeout: Maximum time to wait (seconds)
+
+        Raises:
+            RuntimeError: If timeout occurs or dmesg process dies
+        """
+        print(f"Waiting for {self.scheduler_name} scheduler to be enabled...")
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if self.dmesg_proc and self.dmesg_proc.poll() is not None:
+                raise RuntimeError("dmesg monitoring process died")
+
+            # Read with timeout to avoid blocking forever
+            if self.dmesg_proc and self.dmesg_proc.stdout:
+                ready, _, _ = select.select([self.dmesg_proc.stdout], [], [], 1.0)
+
+                if ready:
+                    line = self.dmesg_proc.stdout.readline()
+                    if line:
+                        stripped = line.strip()
+                        print(f"dmesg: {stripped}")
+
+                        # Keep last 10 lines for debugging
+                        self.dmesg_lines.append(stripped)
+                        if len(self.dmesg_lines) > 10:
+                            self.dmesg_lines.pop(0)
+
+                        # Look for scheduler enabled message
+                        if f'sched_ext: BPF scheduler "{self.scheduler_name}_' in line and "enabled" in line:
+                            print(f"Scheduler {self.scheduler_name} enabled successfully")
+                            time.sleep(1)  # Give it a moment to fully initialize
+                            return
+
+        # Timeout occurred
+        raise RuntimeError(f"Timeout waiting for {self.scheduler_name} scheduler to be enabled")
+
+    def wait_for_disabled(self, timeout: float = 15.0) -> None:
+        """Wait for scheduler disabled message in dmesg.
+
+        Args:
+            timeout: Maximum time to wait (seconds)
+
+        Raises:
+            RuntimeError: If timeout occurs waiting for kernel disable confirmation
+        """
+        print(f"Waiting for {self.scheduler_name} scheduler to be disabled in kernel...")
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if self.dmesg_proc and self.dmesg_proc.poll() is not None:
+                # dmesg process died - warn but don't fail
+                print("  Warning: dmesg monitoring process died during shutdown")
+                return
+
+            # Read with timeout to avoid blocking forever
+            if self.dmesg_proc and self.dmesg_proc.stdout:
+                ready, _, _ = select.select([self.dmesg_proc.stdout], [], [], 1.0)
+
+                if ready:
+                    line = self.dmesg_proc.stdout.readline()
+                    if line:
+                        stripped = line.strip()
+                        print(f"dmesg: {stripped}")
+
+                        # Look for scheduler disabled message
+                        if f'sched_ext: BPF scheduler "{self.scheduler_name}_' in line and "disabled" in line:
+                            print(f"Scheduler {self.scheduler_name} disabled successfully in kernel")
+                            time.sleep(0.5)  # Give it a moment to fully clean up
+                            return
+
+                        # Also look for "unregistered" message
+                        if "sched_ext" in line and "unregistered from user space" in line:
+                            print(f"Scheduler {self.scheduler_name} disabled successfully in kernel")
+                            time.sleep(0.5)
+                            return
+
+        # Timeout occurred - this is a fatal error
+        raise RuntimeError(
+            f"Timeout waiting for {self.scheduler_name} scheduler disable confirmation. "
+            f"Scheduler process was stopped, but kernel disable message not seen in dmesg within {timeout}s"
+        )
+
+    def get_recent_lines(self) -> List[str]:
+        """Get the last 10 lines captured from dmesg."""
+        return list(self.dmesg_lines)
+
+    def cleanup(self) -> None:
+        """Clean up dmesg monitoring process."""
+        if self.dmesg_proc:
+            self.dmesg_proc.terminate()
+            try:
+                self.dmesg_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.dmesg_proc.kill()
+                try:
+                    self.dmesg_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            self.dmesg_proc = None
+
+
 class SchedMonitor:
     """Monitor and manage scheduler processes."""
 
@@ -31,8 +167,7 @@ class SchedMonitor:
         self.scheduler = scheduler
         self.scheduler_path = scheduler_path
         self.scheduler_proc: Optional[subprocess.Popen[str]] = None
-        self.dmesg_proc: Optional[subprocess.Popen[str]] = None
-        self.dmesg_lines: List[str] = []
+        self.dmesg_monitor: Optional[DmesgMonitor] = None
 
         # Map scheduler types to their dmesg names
         self.scheduler_name_map = {
@@ -66,7 +201,7 @@ class SchedMonitor:
             raise ValueError(f"Unknown scheduler type: {self.scheduler}")
 
         # Start dmesg monitoring
-        self._start_dmesg_monitoring(scheduler_name)
+        self.dmesg_monitor = DmesgMonitor(scheduler_name)
 
         try:
             # Start the scheduler process with sudo
@@ -78,25 +213,36 @@ class SchedMonitor:
             )
 
             # Wait for scheduler to be enabled
-            self._wait_for_sched_enabled(scheduler_name, timeout)
+            self.dmesg_monitor.wait_for_enabled(timeout)
 
             return self.scheduler_proc
 
-        except Exception:
+        except RuntimeError:
+            # Print debug info on timeout
+            self._print_debug_info()
             # Clean up on failure
-            self._cleanup_dmesg()
+            if self.dmesg_monitor:
+                self.dmesg_monitor.cleanup()
+                self.dmesg_monitor = None
             if self.scheduler_proc:
                 self._stop_process(self.scheduler_proc)
+                self.scheduler_proc = None
             raise
-        finally:
-            # Always clean up dmesg monitoring
-            self._cleanup_dmesg()
+        except Exception:
+            # Clean up on other failures
+            if self.dmesg_monitor:
+                self.dmesg_monitor.cleanup()
+                self.dmesg_monitor = None
+            if self.scheduler_proc:
+                self._stop_process(self.scheduler_proc)
+                self.scheduler_proc = None
+            raise
 
     def stop(self) -> None:
-        """Stop the scheduler process.
+        """Stop the scheduler process and wait for kernel to confirm it's disabled.
 
         Sends SIGINT to allow the scheduler to cleanly unload itself from
-        the kernel (same as Ctrl-C behavior).
+        the kernel (same as Ctrl-C behavior), then waits for dmesg confirmation.
         """
         if self.scheduler_proc is None:
             return
@@ -106,80 +252,31 @@ class SchedMonitor:
         # Stop the scheduler process (sends SIGINT first, then SIGTERM, then SIGKILL)
         self._stop_process(self.scheduler_proc)
         self.scheduler_proc = None
+
+        # Wait for kernel to confirm scheduler is disabled
+        if self.dmesg_monitor:
+            self.dmesg_monitor.wait_for_disabled()
+            self.dmesg_monitor.cleanup()
+            self.dmesg_monitor = None
+
         print("Scheduler stopped")
 
-    def _start_dmesg_monitoring(self, scheduler_name: str) -> None:
-        """Start dmesg monitoring for the given scheduler."""
-        self.dmesg_proc = subprocess.Popen(
-            ["sudo", "dmesg", "-W"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-
-        if self.dmesg_proc.stdout is None:
-            self._cleanup_dmesg()
-            raise RuntimeError("Failed to start dmesg monitoring")
-
-        print(f"Started dmesg monitoring for {scheduler_name} scheduler...")
-
-    def _wait_for_sched_enabled(self, scheduler_name: str, timeout: float) -> None:
-        """Wait for scheduler enabled message in dmesg.
-
-        Args:
-            scheduler_name: Name of scheduler to look for in dmesg
-            timeout: Maximum time to wait (seconds)
-
-        Raises:
-            RuntimeError: If timeout occurs or dmesg process dies
-        """
-        print(f"Waiting for {scheduler_name} scheduler to be enabled...")
-
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            if self.dmesg_proc and self.dmesg_proc.poll() is not None:
-                raise RuntimeError("dmesg monitoring process died")
-
-            # Read with timeout to avoid blocking forever
-            if self.dmesg_proc and self.dmesg_proc.stdout:
-                ready, _, _ = select.select([self.dmesg_proc.stdout], [], [], 1.0)
-
-                if ready:
-                    line = self.dmesg_proc.stdout.readline()
-                    if line:
-                        stripped = line.strip()
-                        print(f"dmesg: {stripped}")
-
-                        # Keep last 10 lines for debugging
-                        self.dmesg_lines.append(stripped)
-                        if len(self.dmesg_lines) > 10:
-                            self.dmesg_lines.pop(0)
-
-                        # Look for scheduler enabled message
-                        if f'sched_ext: BPF scheduler "{scheduler_name}_' in line and "enabled" in line:
-                            print(f"Scheduler {scheduler_name} enabled successfully")
-                            time.sleep(1)  # Give it a moment to fully initialize
-                            return
-
-        # Timeout occurred - print debug information
-        self._print_debug_info(scheduler_name)
-        raise RuntimeError(f"Timeout waiting for {scheduler_name} scheduler to be enabled")
-
-    def _print_debug_info(self, scheduler_name: str) -> None:
+    def _print_debug_info(self) -> None:
         """Print debug information when scheduler fails to start."""
         print("\n" + "=" * 60)
         print("SCHEDULER STARTUP TIMEOUT - DEBUG INFORMATION")
         print("=" * 60)
 
         print("\nLast 10 dmesg lines:")
-        if self.dmesg_lines:
-            for line in self.dmesg_lines:
-                print(f"  {line}")
+        if self.dmesg_monitor:
+            dmesg_lines = self.dmesg_monitor.get_recent_lines()
+            if dmesg_lines:
+                for line in dmesg_lines:
+                    print(f"  {line}")
+            else:
+                print("  (no dmesg output captured)")
         else:
-            print("  (no dmesg output captured)")
+            print("  (no dmesg monitor active)")
 
         if self.scheduler_proc:
             print("\nScheduler process stdout (last 10 lines):")
@@ -284,17 +381,3 @@ class SchedMonitor:
             print("  Process killed successfully")
         except subprocess.TimeoutExpired:
             print("  Warning: Process may still be running")
-
-    def _cleanup_dmesg(self) -> None:
-        """Clean up dmesg monitoring process."""
-        if self.dmesg_proc:
-            self.dmesg_proc.terminate()
-            try:
-                self.dmesg_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.dmesg_proc.kill()
-                try:
-                    self.dmesg_proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
-            self.dmesg_proc = None
