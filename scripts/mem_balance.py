@@ -175,6 +175,7 @@ class ExperimentRunner:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.run_counter = 1
         self.sched_monitor: Optional[SchedMonitor] = None
+        self.current_scheduler: SchedulerType = SchedulerType.DEFAULT  # Track currently active scheduler
 
     def _get_num_cores(self) -> int:
         """Get number of physical cores on the system."""
@@ -218,20 +219,33 @@ class ExperimentRunner:
         run_config = self._get_run_config_name(pinning, scheduler)
         return f"{workload.value}_{run_config}"
 
-    def _start_scheduler(self, scheduler: SchedulerType) -> Optional[subprocess.Popen[str]]:
-        """Start a scheduler process and wait for it to be enabled."""
-        if scheduler == SchedulerType.DEFAULT:
-            return None  # Default scheduler is always active
+    def _ensure_scheduler(self, scheduler: SchedulerType) -> None:
+        """Ensure the requested scheduler is active, switching if necessary.
 
-        if scheduler == SchedulerType.SCX_LAVD:
-            scheduler_path = SCX_DIR / "target/release/scx_lavd"
+        This is a lazy operation - only switches if the current scheduler
+        doesn't match the requested one.
+        """
+        # If already running the right scheduler, do nothing
+        if self.current_scheduler == scheduler:
+            print(f"Using already-started scheduler: {scheduler.value}")
+            return
 
-            # Create and use SchedMonitor
-            self.sched_monitor = SchedMonitor(scheduler, scheduler_path)
-            proc = self.sched_monitor.start()
-            return proc
+        # Stop current scheduler if it's not DEFAULT
+        if self.current_scheduler != SchedulerType.DEFAULT:
+            self._stop_current_scheduler()
 
-        raise ValueError(f"Unknown scheduler: {scheduler}")
+        # Start new scheduler if it's not DEFAULT
+        if scheduler != SchedulerType.DEFAULT:
+            if scheduler == SchedulerType.SCX_LAVD:
+                scheduler_path = SCX_DIR / "target/release/scx_lavd"
+                self.sched_monitor = SchedMonitor(scheduler, scheduler_path)
+                self.sched_monitor.start()
+            else:
+                raise ValueError(f"Unknown scheduler: {scheduler}")
+
+        # Update current scheduler
+        self.current_scheduler = scheduler
+        print(f"Active scheduler: {scheduler.value}")
 
     def _get_cpu_stress_params(self, num_cores: int) -> str:
         """Get stress-ng CPU workload parameters as a function of core count."""
@@ -241,11 +255,12 @@ class ExperimentRunner:
         """Get stress-ng memory workload parameters as a function of core count."""
         return f"--vm {num_cores} --vm-keep --vm-method ror --vm-bytes {num_cores}g"
 
-    def _stop_scheduler(self, proc: Optional[subprocess.Popen[str]]) -> None:
-        """Stop a scheduler process."""
+    def _stop_current_scheduler(self) -> None:
+        """Stop the currently active scheduler."""
         if self.sched_monitor:
             self.sched_monitor.stop()
             self.sched_monitor = None
+        self.current_scheduler = SchedulerType.DEFAULT
 
     def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
                              scheduler: SchedulerType, run_dir: Path) -> str:
@@ -297,7 +312,7 @@ set -xeuo pipefail
 (stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
    {cpu_params} {cpu_taskset}) &
 stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
-   {mem_params} {mem_taskset};
+    {mem_params} {mem_taskset};
 """
         elif workload == WorkloadType.CPU:
             script_content = f"""#!/bin/bash
@@ -357,37 +372,31 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             f.write(script_content)
         os.chmod(stress_script, 0o755)
 
-        # Start scheduler if needed
-        scheduler_proc = None
-        try:
-            scheduler_proc = self._start_scheduler(scheduler)
+        # Ensure correct scheduler is active (lazy switching)
+        self._ensure_scheduler(scheduler)
 
-            # Run experiment with perf in run directory
-            perf_output_file = run_dir / "perf.json"
-            perf_cmd = [
-                "perf", "stat", "-j",
-                "-e", "instructions,cycles,cache-references,cache-misses",
-                str(stress_script)
-            ]
+        # Run experiment with perf in run directory
+        perf_output_file = run_dir / "perf.json"
+        perf_cmd = [
+            "perf", "stat", "-j",
+            "-e", "instructions,cycles,cache-references,cache-misses",
+            str(stress_script)
+        ]
 
-            print(f"Running: {' '.join(perf_cmd)}")
+        print(f"Running: {' '.join(perf_cmd)}")
 
-            # Run the experiment
-            with open(perf_output_file, 'w') as perf_file:
-                result = subprocess.run(
-                    perf_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=perf_file,
-                    text=True
-                )
+        # Run the experiment
+        with open(perf_output_file, 'w') as perf_file:
+            result = subprocess.run(
+                perf_cmd,
+                stdout=subprocess.PIPE,
+                stderr=perf_file,
+                text=True
+            )
 
-            if result.returncode != 0:
-                print(f"Warning: Experiment failed with return code {result.returncode}")
-                print(f"stdout: {result.stdout}")
-
-        finally:
-            # Always stop the scheduler if we started one
-            self._stop_scheduler(scheduler_proc)
+        if result.returncode != 0:
+            print(f"Warning: Experiment failed with return code {result.returncode}")
+            print(f"stdout: {result.stdout}")
 
         # Parse results
         cpu_metrics: Optional[StressMetrics] = None
@@ -643,19 +652,25 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         print("=" * 60)
 
         # Step 5: Run missing experiments
-        for i, params in enumerate(missing_experiments):
-            print(f"\nProgress: {i+1}/{len(missing_experiments)} (missing experiments)")
+        try:
+            for i, params in enumerate(missing_experiments):
+                print(f"\nProgress: {i+1}/{len(missing_experiments)} (missing experiments)")
 
-            result = self._run_experiment(params.workload, params.pinning, params.scheduler)
-            self.results.append(result)
+                result = self._run_experiment(params.workload, params.pinning, params.scheduler)
+                self.results.append(result)
 
-            # Save intermediate results after each experiment
-            self._save_results()
+                # Save intermediate results after each experiment
+                self._save_results()
 
-        if missing_experiments:
-            print(f"\n{'='*60}")
-            print(f"Completed {len(missing_experiments)} new experiments!")
-            print(f"{'='*60}")
+            if missing_experiments:
+                print(f"\n{'='*60}")
+                print(f"Completed {len(missing_experiments)} new experiments!")
+                print(f"{'='*60}")
+        finally:
+            # Always stop any running scheduler at the end
+            if self.current_scheduler != SchedulerType.DEFAULT:
+                print(f"\nCleaning up: Stopping {self.current_scheduler.value} scheduler...")
+                self._stop_current_scheduler()
 
         # Create/update latest symlink
         self._update_latest_symlink()
