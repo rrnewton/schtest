@@ -214,44 +214,47 @@ class Machine:
 
         return sorted(partition_a), sorted(partition_b)
 
-    def split_dies(self) -> Tuple[List[int], List[int]]:
+    def split_l3s(self) -> Tuple[List[int], List[int]]:
         """
-        Split the machine in half at the Die level.
+        Split the machine in half at the L3 cache level.
 
         Returns:
-            Tuple of two lists of CPU numbers, where dies are split evenly
+            Tuple of two lists of CPU numbers, where L3 caches are split evenly
             between the two partitions.
 
         Raises:
-            ValueError: If there are an odd number of dies.
+            ValueError: If there are an odd number of L3 caches or only one L3.
         """
         partition_a = []
         partition_b = []
 
-        # Collect all dies across all packages
-        all_dies = []
+        # Collect all L3 caches across all packages and dies
+        all_l3s = []
         for package in self.packages:
-            all_dies.extend(package.dies)
+            for die in package.dies:
+                all_l3s.extend(die.l3_caches)
 
-        if len(all_dies) % 2 != 0:
+        if len(all_l3s) < 2:
             raise ValueError(
-                f"Cannot split dies evenly: found {len(all_dies)} dies (odd number)"
+                f"Cannot split L3 caches: found {len(all_l3s)} L3 cache(s), need at least 2"
             )
 
-        if not all_dies:
-            raise ValueError("No dies found in topology")
+        if len(all_l3s) % 2 != 0:
+            raise ValueError(
+                f"Cannot split L3 caches evenly: found {len(all_l3s)} L3 caches (odd number)"
+            )
 
-        # Sort dies by os_index for consistent partitioning
-        sorted_dies = sorted(all_dies, key=lambda die: die.os_index)
+        # Sort L3s by gp_index for consistent partitioning
+        sorted_l3s = sorted(all_l3s, key=lambda l3: l3.gp_index)
 
-        # Split dies in half
-        mid_point = len(sorted_dies) // 2
+        # Split L3s in half
+        mid_point = len(sorted_l3s) // 2
 
-        for die in sorted_dies[:mid_point]:
-            partition_a.extend(die.get_cpu_numbers())
+        for l3 in sorted_l3s[:mid_point]:
+            partition_a.extend(l3.get_cpu_numbers())
 
-        for die in sorted_dies[mid_point:]:
-            partition_b.extend(die.get_cpu_numbers())
+        for l3 in sorted_l3s[mid_point:]:
+            partition_b.extend(l3.get_cpu_numbers())
 
         return sorted(partition_a), sorted(partition_b)
 
@@ -522,11 +525,11 @@ def main() -> None:
             print(f"\nHyperthread split error: {e}")
 
         try:
-            a, b = machine.split_dies()
-            print(f"\nDie split A: {a}")
-            print(f"Die split B: {b}")
+            a, b = machine.split_l3s()
+            print(f"\nL3 split A: {a}")
+            print(f"L3 split B: {b}")
         except ValueError as e:
-            print(f"\nDie split error: {e}")
+            print(f"\nL3 split error: {e}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

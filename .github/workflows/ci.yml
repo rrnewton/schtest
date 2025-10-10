@@ -56,5 +56,6 @@ jobs:
           cd scripts
           make install_deps typecheck
           lstopo
+          lstopo --output-format xml --no-io --no-bridges
           make unittest-ci
           make quick_test # e2e test

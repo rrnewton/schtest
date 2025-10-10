@@ -86,41 +86,41 @@ class TestParseTopology:
             f"✓ Hyperthread split validation passed: {len(ht_a)} + {len(ht_b)} = {len(all_cpus)} CPUs"
         )
 
-    def test_split_dies_properties(self, machine):
-        """Test split_dies satisfies the required properties."""
+    def test_split_l3s_properties(self, machine):
+        """Test split_l3s satisfies the required properties."""
         try:
-            die_a, die_b = machine.split_dies()
+            l3_a, l3_b = machine.split_l3s()
         except ValueError as e:
-            pytest.skip(f"Die split not possible: {e}")
+            pytest.skip(f"L3 split not possible: {e}")
 
         all_cpus = set(machine.get_cpu_numbers())
-        set_a = set(die_a)
-        set_b = set(die_b)
+        set_a = set(l3_a)
+        set_b = set(l3_b)
 
-        # Property 1: Note - die splits may NOT have equal numbers since dies can have different CPU counts
+        # Property 1: Note - L3 splits may NOT have equal numbers since L3s can have different CPU counts
         # We just verify both partitions have some CPUs
-        assert len(die_a) > 0, "Die partition A should have CPUs"
-        assert len(die_b) > 0, "Die partition B should have CPUs"
+        assert len(l3_a) > 0, "L3 partition A should have CPUs"
+        assert len(l3_b) > 0, "L3 partition B should have CPUs"
 
         # Property 2: Disjoint sets (no CPU appears in both partitions)
         intersection = set_a & set_b
         assert len(intersection) == 0, (
-            f"Die splits should be disjoint, found overlap: {intersection}"
+            f"L3 splits should be disjoint, found overlap: {intersection}"
         )
 
         # Property 3: Union equals complete set
         union = set_a | set_b
         assert union == all_cpus, (
-            f"Die splits should union to complete set. "
+            f"L3 splits should union to complete set. "
             f"Missing: {all_cpus - union}, Extra: {union - all_cpus}"
         )
 
         # Additional validation: splits should be sorted
-        assert die_a == sorted(die_a), "Partition A should be sorted"
-        assert die_b == sorted(die_b), "Partition B should be sorted"
+        assert l3_a == sorted(l3_a), "Partition A should be sorted"
+        assert l3_b == sorted(l3_b), "Partition B should be sorted"
 
         print(
-            f"✓ Die split validation passed: {len(die_a)} + {len(die_b)} = {len(all_cpus)} CPUs"
+            f"✓ L3 split validation passed: {len(l3_a)} + {len(l3_b)} = {len(all_cpus)} CPUs"
         )
 
     def test_split_hyperthreads_hyperthread_pattern(self, machine):
@@ -232,16 +232,16 @@ class TestSplitEdgeCases:
         except ValueError:
             print("⚠ Skipping hyperthread consistency test (not available)")
 
-        # Test die split consistency
+        # Test L3 split consistency
         try:
-            die_a1, die_b1 = machine.split_dies()
-            die_a2, die_b2 = machine.split_dies()
+            l3_a1, l3_b1 = machine.split_l3s()
+            l3_a2, l3_b2 = machine.split_l3s()
 
-            assert die_a1 == die_a2, "Multiple die splits should return same partition A"
-            assert die_b1 == die_b2, "Multiple die splits should return same partition B"
-            print("✓ Die split consistency verified")
+            assert l3_a1 == l3_a2, "Multiple L3 splits should return same partition A"
+            assert l3_b1 == l3_b2, "Multiple L3 splits should return same partition B"
+            print("✓ L3 split consistency verified")
         except ValueError:
-            print("⚠ Skipping die consistency test (not available)")
+            print("⚠ Skipping L3 consistency test (not available)")
 
 
 # Optional: provide backward compatibility if someone runs this file directly

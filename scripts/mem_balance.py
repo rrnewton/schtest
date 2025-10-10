@@ -285,14 +285,14 @@ class ExperimentRunner:
                 cpu_taskset = ""
                 mem_taskset = ""
         elif pinning == PinningStrategy.HALF:
-            # Use split_dies to occupy only half of the cores physically
+            # Use split_l3s to occupy only half of the cores physically
             try:
-                cpu_list, mem_list = self.topology.split_dies()
+                cpu_list, mem_list = self.topology.split_l3s()
                 cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
                 mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
                 print(f"HALF strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
             except ValueError as e:
-                print(f"Warning: Could not split dies ({e}), falling back to no pinning")
+                print(f"Warning: Could not split L3s ({e}), falling back to no pinning")
                 cpu_taskset = ""
                 mem_taskset = ""
         else:
