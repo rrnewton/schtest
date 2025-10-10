@@ -834,15 +834,26 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
 
                 cpu_values: List[float] = []
                 mem_values: List[float] = []
+                cache_miss_rates: List[float] = []
 
                 for workload in workloads:
                     row = subset[subset['workload'] == workload]
                     if len(row) > 0:
                         cpu_values.append(float(row['cpu_normalized'].iloc[0]))
                         mem_values.append(float(row['mem_normalized'].iloc[0]))
+                        
+                        # Calculate cache miss rate
+                        cache_refs = float(row['cache_refs'].iloc[0])
+                        cache_misses = float(row['cache_misses'].iloc[0])
+                        if cache_refs > 0:
+                            miss_rate = (cache_misses / cache_refs) * 100
+                        else:
+                            miss_rate = 0.0
+                        cache_miss_rates.append(miss_rate)
                     else:
                         cpu_values.append(0.0)
                         mem_values.append(0.0)
+                        cache_miss_rates.append(0.0)
 
                 # Create stacked bars with consistent colors
                 x_offset = x_pos + i * width
@@ -856,7 +867,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                                 edgecolor='black', linewidth=0.5)
 
                 # Add percentage labels on bars
-                for j, (cpu_bar, mem_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values)):
+                for j, (cpu_bar, mem_bar, cpu_val, mem_val, miss_rate) in enumerate(zip(cpu_bars, mem_bars, cpu_values, mem_values, cache_miss_rates)):
                     # CPU label (middle of CPU portion)
                     if cpu_val > 5:  # Only show label if bar is tall enough
                         ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
@@ -869,6 +880,13 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                                cpu_val + mem_val/2,
                                f'{mem_val:.0f}%', ha='center', va='center',
                                fontweight='bold', fontsize=9, color='white')
+                    
+                    # Cache miss rate label at bottom of bar
+                    if miss_rate > 0:
+                        ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 3,
+                               f'{miss_rate:.1f}% miss', ha='center', va='bottom',
+                               fontsize=7, color='yellow', fontweight='bold',
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7, edgecolor='none'))
 
                 # Add combined throughput labels on top of all bars
                 for j, (cpu_bar, cpu_val, mem_val) in enumerate(zip(cpu_bars, cpu_values, mem_values)):
