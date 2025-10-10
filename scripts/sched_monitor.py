@@ -147,7 +147,7 @@ class DmesgMonitor:
         if self.dmesg_proc:
             import os
             import signal
-            
+
             # Kill the entire process group (sudo + dmesg)
             try:
                 if self.dmesg_proc.poll() is None:  # Process still running
@@ -163,7 +163,7 @@ class DmesgMonitor:
             except (ProcessLookupError, PermissionError):
                 # Process or group already gone
                 pass
-            
+
             self.dmesg_proc = None
 
 
@@ -366,9 +366,9 @@ class SchedMonitor:
     def _stop_process(self, proc: subprocess.Popen[str]) -> None:
         """Stop a process and its children gracefully, with fallback to kill.
 
-        Sends SIGINT first (like Ctrl-C) to the process group to allow the scheduler 
+        Sends SIGINT first (like Ctrl-C) to the process group to allow the scheduler
         to cleanly unload itself from the kernel, then falls back to SIGTERM and SIGKILL.
-        
+
         Since we start processes with sudo, we need to kill the entire process group
         (sudo + the actual scheduler) not just the sudo wrapper.
         """
