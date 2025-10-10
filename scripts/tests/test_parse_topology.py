@@ -198,21 +198,16 @@ class TestParseTopology:
         # Count topology elements
         total_packages = len(machine.packages)
         total_dies = sum(len(pkg.dies) for pkg in machine.packages)
-        total_l3_caches_in_dies = sum(
+        total_l3_caches = sum(
             len(die.l3_caches) for pkg in machine.packages for die in pkg.dies
         )
-        total_l3_caches_in_pkgs = sum(len(pkg.l3_caches) for pkg in machine.packages)
-        total_l3_caches = total_l3_caches_in_dies + total_l3_caches_in_pkgs
         total_numa_nodes = sum(len(pkg.numa_nodes) for pkg in machine.packages)
 
         # Validation
         assert total_packages > 0, "Should have at least one package"
-        # Dies are optional (simpler topologies may not have them)
-        if total_dies > 0:
-            assert total_dies >= total_packages, "If dies exist, should have at least as many as packages"
-            assert total_l3_caches_in_dies >= total_dies, "If dies exist, should have at least as many L3 caches in dies"
-        # Either have dies OR direct L3 caches under packages
-        assert total_dies > 0 or total_l3_caches_in_pkgs > 0, "Should have either dies or L3 caches directly under packages"
+        # All packages should have at least one die (explicit or implicit)
+        assert total_dies >= total_packages, "Should have at least as many dies as packages"
+        assert total_l3_caches >= total_dies, "Should have at least as many L3 caches as dies"
         assert total_numa_nodes >= 0, "NUMA nodes count should be non-negative"
 
         print(

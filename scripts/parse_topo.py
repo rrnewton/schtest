@@ -132,7 +132,6 @@ class Package:
     cpu_model: str
     numa_nodes: List[NUMANode] = field(default_factory=list)
     dies: List[Die] = field(default_factory=list)
-    l3_caches: List[L3Cache] = field(default_factory=list)  # L3 caches directly under package (no dies)
 
     def __str__(self) -> str:
         return f"Package L#{self.os_index}"
@@ -140,12 +139,8 @@ class Package:
     def get_cpu_numbers(self) -> List[int]:
         """Get list of CPU numbers for all PUs under this package."""
         cpu_numbers = []
-        # Get CPUs from dies (if present)
         for die in self.dies:
             cpu_numbers.extend(die.get_cpu_numbers())
-        # Get CPUs from L3 caches directly under package (simpler topologies)
-        for l3 in self.l3_caches:
-            cpu_numbers.extend(l3.get_cpu_numbers())
         return sorted(cpu_numbers)
 
 
@@ -187,17 +182,11 @@ class Machine:
         # Collect all cores across all packages and dies
         all_cores = []
         for package in self.packages:
-            # Cores under dies (complex topologies)
             for die in package.dies:
                 for l3 in die.l3_caches:
                     all_cores.extend(l3.cores)
                     for l2 in l3.l2_caches:
                         all_cores.extend(l2.cores)
-            # Cores under L3 caches directly under package (simpler topologies)
-            for l3 in package.l3_caches:
-                all_cores.extend(l3.cores)
-                for l2 in l3.l2_caches:
-                    all_cores.extend(l2.cores)
 
         if not all_cores:
             raise ValueError("No cores found in topology")
@@ -424,14 +413,28 @@ class LstopoParser:
             package.numa_nodes.append(self._parse_numa_node(numa_elem))
 
         # Parse dies
-        for die_elem in package_elem.findall('./object[@type="Die"]'):
-            package.dies.append(self._parse_die(die_elem))
+        die_elems = package_elem.findall('./object[@type="Die"]')
+        if die_elems:
+            # Explicit dies in topology
+            for die_elem in die_elems:
+                package.dies.append(self._parse_die(die_elem))
+        else:
+            # No explicit dies - create an implicit die to contain L3 caches
+            # This handles simpler topologies where L3 is under NUMANode → Package
+            l3_caches = []
+            for numa_elem in package_elem.findall('./object[@type="NUMANode"]'):
+                for l3_elem in numa_elem.findall('./object[@type="L3Cache"]'):
+                    l3_caches.append(self._parse_l3_cache(l3_elem))
 
-        # Parse L3 caches directly under package (for simpler topologies without dies)
-        # This handles cases where L3 is under NUMANode which is under Package
-        for numa_elem in package_elem.findall('./object[@type="NUMANode"]'):
-            for l3_elem in numa_elem.findall('./object[@type="L3Cache"]'):
-                package.l3_caches.append(self._parse_l3_cache(l3_elem))
+            if l3_caches:
+                # Create an implicit die to contain the L3 caches
+                implicit_die = Die(
+                    os_index=0,
+                    gp_index=0,
+                    cpuset=package.cpuset,
+                    l3_caches=l3_caches,
+                )
+                package.dies.append(implicit_die)
 
         return package
 
@@ -505,19 +508,6 @@ def main() -> None:
                 for l3 in die.l3_caches:
                     print(f"      {l3}")
                     for core in l3.cores:
-                        print(f"        {core}")
-                        for pu in core.processing_units:
-                            print(f"          {pu}")
-            # L3 caches directly under package (simpler topologies)
-            for l3 in package.l3_caches:
-                print(f"    {l3}")
-                for core in l3.cores:
-                    print(f"      {core}")
-                    for pu in core.processing_units:
-                        print(f"        {pu}")
-                for l2 in l3.l2_caches:
-                    print(f"      {l2}")
-                    for core in l2.cores:
                         print(f"        {core}")
                         for pu in core.processing_units:
                             print(f"          {pu}")
