@@ -287,7 +287,7 @@ class ExperimentRunner:
         elif pinning == PinningStrategy.HALF:
             # Use split_l3s to occupy only half of the cores physically
             try:
-                cpu_list, mem_list = self.topology.split_l3s()
+                _, cpu_list, mem_list = self.topology.split_physical()
                 cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
                 mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
                 print(f"HALF strategy: CPU cores {cpu_list}, MEM cores {mem_list}")

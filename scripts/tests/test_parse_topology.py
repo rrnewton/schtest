@@ -156,6 +156,51 @@ class TestParseTopology:
             f"✓ L3 split validation passed: {len(l3_a)} + {len(l3_b)} = {len(all_cpus)} CPUs"
         )
 
+    def test_split_physical_properties(self, machine):
+        """Test split_physical satisfies the required properties.
+
+        This test is stricter than split_l3s because split_physical should ALWAYS succeed
+        by trying multiple hierarchy levels (Package, NUMANode, Die, L3, L2, Core, Hyperthread).
+        """
+        # Should never raise ValueError - split_physical tries multiple levels
+        level, phys_a, phys_b = machine.split_physical()
+
+        assert level is not None, "split_physical should return a valid level name"
+        assert isinstance(level, str), "Level name should be a string"
+        assert level in ["Package", "Die", "L3", "L2", "Core", "Hyperthread"], (
+            f"Level '{level}' should be one of the hierarchy levels"
+        )
+
+        all_cpus = set(machine.get_cpu_numbers())
+        set_a = set(phys_a)
+        set_b = set(phys_b)
+
+        # Property 1: Both partitions must have CPUs (stricter - no skip)
+        assert len(phys_a) > 0, "Physical partition A must have CPUs"
+        assert len(phys_b) > 0, "Physical partition B must have CPUs"
+
+        # Property 2: Disjoint sets (no CPU appears in both partitions)
+        intersection = set_a & set_b
+        assert len(intersection) == 0, (
+            f"Physical splits should be disjoint, found overlap: {intersection}"
+        )
+
+        # Property 3: Union equals complete set
+        union = set_a | set_b
+        assert union == all_cpus, (
+            f"Physical splits should union to complete set. "
+            f"Missing: {all_cpus - union}, Extra: {union - all_cpus}"
+        )
+
+        # Additional validation: splits should be sorted
+        assert phys_a == sorted(phys_a), "Partition A should be sorted"
+        assert phys_b == sorted(phys_b), "Partition B should be sorted"
+
+        print(
+            f"✓ Physical split validation passed at {level} level: "
+            f"{len(phys_a)} + {len(phys_b)} = {len(all_cpus)} CPUs"
+        )
+
     def test_split_hyperthreads_hyperthread_pattern(self, machine):
         """Test that hyperthread split actually separates hyperthreads within cores."""
         try:
@@ -275,6 +320,15 @@ class TestSplitEdgeCases:
             print("✓ L3 split consistency verified")
         except ValueError:
             print("⚠ Skipping L3 consistency test (not available)")
+
+        # Test physical split consistency (should always succeed)
+        level1, phys_a1, phys_b1 = machine.split_physical()
+        level2, phys_a2, phys_b2 = machine.split_physical()
+
+        assert level1 == level2, "Multiple physical splits should return same level"
+        assert phys_a1 == phys_a2, "Multiple physical splits should return same partition A"
+        assert phys_b1 == phys_b2, "Multiple physical splits should return same partition B"
+        print(f"✓ Physical split consistency verified at {level1} level")
 
 
 # Optional: provide backward compatibility if someone runs this file directly

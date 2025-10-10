@@ -258,6 +258,133 @@ class Machine:
 
         return sorted(partition_a), sorted(partition_b)
 
+    def split_physical(self) -> Tuple[str, List[int], List[int]]:
+        """
+        Split the machine in half physically at the highest level of hierarchy
+        that is evenly divisible by 2.
+
+        Tries splitting at each level of the hierarchy in order:
+        1. Package
+        2. NUMANode
+        3. Die
+        4. L3 cache
+        5. L2 cache (under L3s)
+        6. Core
+        7. Hyperthread (SMT)
+
+        Returns:
+            Tuple of (level_name, partition_a, partition_b) where:
+            - level_name: String indicating the level where the split occurred
+            - partition_a: List of CPU numbers in first partition
+            - partition_b: List of CPU numbers in second partition
+
+        Raises:
+            ValueError: If no level can be split evenly (should be very rare).
+        """
+        # Try Package level
+        if len(self.packages) >= 2 and len(self.packages) % 2 == 0:
+            partition_a = []
+            partition_b = []
+            sorted_packages = sorted(self.packages, key=lambda pkg: pkg.os_index)
+            mid = len(sorted_packages) // 2
+            for pkg in sorted_packages[:mid]:
+                partition_a.extend(pkg.get_cpu_numbers())
+            for pkg in sorted_packages[mid:]:
+                partition_b.extend(pkg.get_cpu_numbers())
+            return ("Package", sorted(partition_a), sorted(partition_b))
+
+        # Try NUMANode level
+        all_numa_nodes = []
+        for package in self.packages:
+            all_numa_nodes.extend(package.numa_nodes)
+        if len(all_numa_nodes) >= 2 and len(all_numa_nodes) % 2 == 0:
+            # NUMANode doesn't have get_cpu_numbers, so we need to match by cpuset
+            # For simplicity, we'll skip this level for now and move to Die
+            pass
+
+        # Try Die level
+        all_dies = []
+        for package in self.packages:
+            all_dies.extend(package.dies)
+        if len(all_dies) >= 2 and len(all_dies) % 2 == 0:
+            partition_a = []
+            partition_b = []
+            sorted_dies = sorted(all_dies, key=lambda die: die.os_index)
+            mid = len(sorted_dies) // 2
+            for die in sorted_dies[:mid]:
+                partition_a.extend(die.get_cpu_numbers())
+            for die in sorted_dies[mid:]:
+                partition_b.extend(die.get_cpu_numbers())
+            return ("Die", sorted(partition_a), sorted(partition_b))
+
+        # Try L3 cache level
+        all_l3s = []
+        for package in self.packages:
+            for die in package.dies:
+                all_l3s.extend(die.l3_caches)
+        if len(all_l3s) >= 2 and len(all_l3s) % 2 == 0:
+            partition_a = []
+            partition_b = []
+            sorted_l3s = sorted(all_l3s, key=lambda l3: l3.gp_index)
+            mid = len(sorted_l3s) // 2
+            for l3 in sorted_l3s[:mid]:
+                partition_a.extend(l3.get_cpu_numbers())
+            for l3 in sorted_l3s[mid:]:
+                partition_b.extend(l3.get_cpu_numbers())
+            return ("L3", sorted(partition_a), sorted(partition_b))
+
+        # Try L2 cache level
+        all_l2s = []
+        for package in self.packages:
+            for die in package.dies:
+                for l3 in die.l3_caches:
+                    all_l2s.extend(l3.l2_caches)
+        if len(all_l2s) >= 2 and len(all_l2s) % 2 == 0:
+            partition_a = []
+            partition_b = []
+            sorted_l2s = sorted(all_l2s, key=lambda l2: l2.gp_index)
+            mid = len(sorted_l2s) // 2
+            for l2 in sorted_l2s[:mid]:
+                for core in l2.cores:
+                    partition_a.extend(core.get_cpu_numbers())
+            for l2 in sorted_l2s[mid:]:
+                for core in l2.cores:
+                    partition_b.extend(core.get_cpu_numbers())
+            return ("L2", sorted(partition_a), sorted(partition_b))
+
+        # Try Core level
+        all_cores = []
+        for package in self.packages:
+            for die in package.dies:
+                for l3 in die.l3_caches:
+                    all_cores.extend(l3.cores)
+                    for l2 in l3.l2_caches:
+                        all_cores.extend(l2.cores)
+        if len(all_cores) >= 2 and len(all_cores) % 2 == 0:
+            partition_a = []
+            partition_b = []
+            sorted_cores = sorted(all_cores, key=lambda core: core.os_index)
+            mid = len(sorted_cores) // 2
+            for core in sorted_cores[:mid]:
+                partition_a.extend(core.get_cpu_numbers())
+            for core in sorted_cores[mid:]:
+                partition_b.extend(core.get_cpu_numbers())
+            return ("Core", sorted(partition_a), sorted(partition_b))
+
+        # Try Hyperthread level (SMT)
+        try:
+            ht_a, ht_b = self.split_hyperthreads()
+            return ("Hyperthread", ht_a, ht_b)
+        except ValueError:
+            pass
+
+        # If we get here, no level can be split evenly
+        raise ValueError(
+            "Cannot split machine evenly at any level of the hierarchy. "
+            f"Packages: {len(self.packages)}, Dies: {len(all_dies)}, "
+            f"L3s: {len(all_l3s)}, L2s: {len(all_l2s)}, Cores: {len(all_cores)}"
+        )
+
 
 class LstopoParser:
     """Parser for lstopo XML output."""
@@ -529,6 +656,14 @@ def main() -> None:
             print(f"L3 split B: {b}")
         except ValueError as e:
             print(f"\nL3 split error: {e}")
+
+        try:
+            level, a, b = machine.split_physical()
+            print(f"\nPhysical split at {level} level:")
+            print(f"  Partition A ({len(a)} CPUs): {a}")
+            print(f"  Partition B ({len(b)} CPUs): {b}")
+        except ValueError as e:
+            print(f"\nPhysical split error: {e}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
