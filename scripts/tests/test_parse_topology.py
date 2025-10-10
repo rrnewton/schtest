@@ -13,19 +13,52 @@ Tests the parsing of CPU topology and the split functions to ensure:
 import os
 import sys
 import pytest
+from pathlib import Path
+from typing import List
 
 # Add parent directory to Python path for imports
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from parse_topo import Machine, parse_topology
+from parse_topo import Machine, LstopoParser, parse_topology
 
 
-@pytest.fixture(scope="session")
-def machine():
-    """Fixture to parse topology once for all tests."""
-    print("Parsing CPU topology...")
-    parsed_machine = parse_topology()
-    print(f"Topology parsed: {parsed_machine}")
+def get_test_topologies() -> List[tuple[str, Path]]:
+    """Get list of test topology XML files."""
+    topos_dir = Path(__file__).parent / "topos"
+    if not topos_dir.exists():
+        return []
+
+    xml_files = sorted(topos_dir.glob("*.xml"))
+    return [(xml_file.stem, xml_file) for xml_file in xml_files]
+
+
+@pytest.fixture(scope="session", params=["native"] + [name for name, _ in get_test_topologies()])
+def machine(request):
+    """Fixture to parse topology - either native or from test XML files."""
+    topology_name = request.param
+
+    if topology_name == "native":
+        print("\nParsing native CPU topology...")
+        parsed_machine = parse_topology()
+    else:
+        # Find the XML file for this topology
+        xml_path = None
+        for name, path in get_test_topologies():
+            if name == topology_name:
+                xml_path = path
+                break
+
+        if xml_path is None:
+            pytest.skip(f"Topology file not found: {topology_name}")
+
+        print(f"\nParsing topology from {xml_path.name}...")
+        with open(xml_path, 'r') as f:
+            xml_content = f.read()
+
+        parser = LstopoParser()
+        parsed_machine = parser.parse_xml(xml_content)
+
+    print(f"Topology parsed: {parsed_machine} (source: {topology_name})")
     return parsed_machine
 
 

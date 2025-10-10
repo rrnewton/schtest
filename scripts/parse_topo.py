@@ -423,11 +423,10 @@ class LstopoParser:
                 package.dies.append(self._parse_die(die_elem))
         else:
             # No explicit dies - create an implicit die to contain L3 caches
-            # This handles simpler topologies where L3 is under NUMANode → Package
+            # This handles simpler topologies where L3 caches are direct children of Package
             l3_caches = []
-            for numa_elem in package_elem.findall('./object[@type="NUMANode"]'):
-                for l3_elem in numa_elem.findall('./object[@type="L3Cache"]'):
-                    l3_caches.append(self._parse_l3_cache(l3_elem))
+            for l3_elem in package_elem.findall('./object[@type="L3Cache"]'):
+                l3_caches.append(self._parse_l3_cache(l3_elem))
 
             if l3_caches:
                 # Create an implicit die to contain the L3 caches
