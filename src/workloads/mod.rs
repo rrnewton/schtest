@@ -4,6 +4,7 @@
 //! functionality, including spinners, semaphores, and benchmarking utilities.
 
 pub mod benchmark;
+pub mod cgroup_tree;
 pub mod context;
 pub mod process;
 pub mod semaphore;
