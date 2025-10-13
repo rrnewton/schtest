@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Set, List, Any
 from enum import Enum
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 # Import topology parser
 from parse_topo import parse_topology, Machine
@@ -159,6 +160,131 @@ class ExperimentResult:
         })
         return result
 
+
+class Stressor(ABC):
+    """Abstract base class for stress testing tools."""
+
+    def __init__(self, duration: int, output_dir: Path):
+        """Initialize stressor with duration and output directory.
+
+        Args:
+            duration: Test duration in seconds
+            output_dir: Directory where output files will be written
+        """
+        self.duration = duration
+        self.output_dir = output_dir
+        self.cpu_stressors: List[Dict[str, Any]] = []
+        self.mem_stressors: List[Dict[str, Any]] = []
+
+    def add_cpu_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs) -> 'Stressor':
+        """Add a CPU stress test.
+
+        Args:
+            count: Number of CPU stressor instances
+            cpu_list: List of CPU numbers to pin to, or None for no pinning
+            **kwargs: Additional stressor-specific parameters
+
+        Returns:
+            Self for method chaining
+        """
+        self.cpu_stressors.append({
+            'count': count,
+            'cpu_list': cpu_list,
+            'kwargs': kwargs
+        })
+        return self
+
+    def add_mem_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs) -> 'Stressor':
+        """Add a memory stress test.
+
+        Args:
+            count: Number of memory stressor instances
+            cpu_list: List of CPU numbers to pin to, or None for no pinning
+            **kwargs: Additional stressor-specific parameters
+
+        Returns:
+            Self for method chaining
+        """
+        self.mem_stressors.append({
+            'count': count,
+            'cpu_list': cpu_list,
+            'kwargs': kwargs
+        })
+        return self
+
+    @abstractmethod
+    def create_script(self) -> str:
+        """Generate the bash script content for this stressor configuration.
+
+        Returns:
+            Bash script content as a string
+        """
+        pass
+
+
+class StressNGStressor(Stressor):
+    """Stress-ng based stressor implementation."""
+
+    def __init__(self, duration: int, output_dir: Path):
+        """Initialize stress-ng stressor.
+
+        Args:
+            duration: Test duration in seconds
+            output_dir: Directory where YAML output files will be written
+        """
+        super().__init__(duration, output_dir)
+
+    def _format_cpu_list(self, cpu_list: Optional[List[int]]) -> str:
+        """Format CPU list for taskset parameter."""
+        if not cpu_list:
+            return ""
+        return f"--taskset {','.join(map(str, cpu_list))}"
+
+    def _get_cpu_params(self, count: int, **kwargs) -> str:
+        """Get stress-ng CPU workload parameters."""
+        method = kwargs.get('method', 'int64')
+        return f"--cpu {count} --cpu-method {method}"
+
+    def _get_mem_params(self, count: int, **kwargs) -> str:
+        """Get stress-ng memory workload parameters."""
+        method = kwargs.get('method', 'ror')
+        bytes_per_worker = kwargs.get('bytes_per_worker', f'{count}g')
+        keep = '--vm-keep' if kwargs.get('keep', True) else ''
+        return f"--vm {count} {keep} --vm-method {method} --vm-bytes {bytes_per_worker}"
+
+    def create_script(self) -> str:
+        """Generate bash script for stress-ng configuration."""
+        script_lines = ["#!/bin/bash", "set -xeuo pipefail"]
+
+        # Determine if we need to run stressors in parallel
+        has_multiple_stressor_types = bool(self.cpu_stressors and self.mem_stressors)
+
+        # Add CPU stressors
+        for i, cpu_stress in enumerate(self.cpu_stressors):
+            output_file = self.output_dir / f"metrics_cpu_{i}.yaml"
+            taskset = self._format_cpu_list(cpu_stress['cpu_list'])
+            params = self._get_cpu_params(cpu_stress['count'], **cpu_stress['kwargs'])
+
+            cmd = f"stress-ng --metrics -t {self.duration} --yaml {output_file} {params} {taskset}"
+
+            # If we have both CPU and memory stressors, run CPU stressors in background
+            if has_multiple_stressor_types:
+                script_lines.append(f"({cmd}) &")
+            else:
+                script_lines.append(f"{cmd};")
+
+        # Add memory stressors
+        for i, mem_stress in enumerate(self.mem_stressors):
+            output_file = self.output_dir / f"metrics_mem_{i}.yaml"
+            taskset = self._format_cpu_list(mem_stress['cpu_list'])
+            params = self._get_mem_params(mem_stress['count'], **mem_stress['kwargs'])
+
+            cmd = f"stress-ng --metrics -t {self.duration} --yaml {output_file} {params} {taskset}"
+            script_lines.append(f"{cmd};")
+
+        return "\n".join(script_lines) + "\n"
+
+
 class ExperimentRunner:
     def __init__(self, machine_name: Optional[str] = None) -> None:
         self.num_cores = self._get_num_cores()
@@ -247,13 +373,54 @@ class ExperimentRunner:
         self.current_scheduler = scheduler
         print(f"Active scheduler: {scheduler.value}")
 
-    def _get_cpu_stress_params(self, num_cores: int) -> str:
-        """Get stress-ng CPU workload parameters as a function of core count."""
-        return f"--cpu {num_cores} --cpu-method int64"
+    def _get_cpu_list_for_pinning(self, pinning: PinningStrategy) -> Tuple[Optional[List[int]], Optional[List[int]]]:
+        """Get CPU lists for CPU and memory workloads based on pinning strategy.
 
-    def _get_mem_stress_params(self, num_cores: int) -> str:
-        """Get stress-ng memory workload parameters as a function of core count."""
-        return f"--vm {num_cores} --vm-keep --vm-method ror --vm-bytes {num_cores}g"
+        Returns:
+            Tuple of (cpu_list, mem_list) where each can be None for no pinning
+        """
+        if pinning == PinningStrategy.NONE:
+            return None, None
+        elif pinning == PinningStrategy.SPREAD:
+            # Use split_hyperthreads to spread across all cores
+            try:
+                cpu_list, mem_list = self.topology.split_hyperthreads()
+                print(f"SPREAD strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
+                return cpu_list, mem_list
+            except ValueError as e:
+                print(f"Warning: Could not split hyperthreads ({e}), falling back to no pinning")
+                return None, None
+        elif pinning == PinningStrategy.HALF:
+            # Use split_physical to occupy only half of the cores physically
+            try:
+                _, cpu_list, mem_list = self.topology.split_physical()
+                print(f"HALF strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
+                return cpu_list, mem_list
+            except ValueError as e:
+                print(f"Warning: Could not split physical cores ({e}), falling back to no pinning")
+                return None, None
+        else:
+            raise ValueError(f"Unknown pinning strategy: {pinning}")
+
+    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
+                             scheduler: SchedulerType, run_dir: Path) -> str:
+        """Create stress.sh script for given configuration using StressNGStressor."""
+        P = self.num_cores
+
+        # Get CPU lists based on pinning strategy
+        cpu_list, mem_list = self._get_cpu_list_for_pinning(pinning)
+
+        # Create stressor with output directory
+        stressor = StressNGStressor(EXPERIMENT_DURATION, run_dir)
+
+        # Add stressors based on workload type
+        if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
+            stressor.add_cpu_stressor(P, cpu_list, method='int64')
+
+        if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
+            stressor.add_mem_stressor(P, mem_list, method='ror', bytes_per_worker=f'{P}g', keep=True)
+
+        return stressor.create_script()
 
     def _stop_current_scheduler(self) -> None:
         """Stop the currently active scheduler."""
@@ -261,75 +428,6 @@ class ExperimentRunner:
             self.sched_monitor.stop()
             self.sched_monitor = None
         self.current_scheduler = SchedulerType.DEFAULT
-
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
-                             scheduler: SchedulerType, run_dir: Path) -> str:
-        """Create stress.sh script for given configuration."""
-        P = self.num_cores
-        run_config = self._get_run_config_name(pinning, scheduler)
-        run_name = run_dir.name
-
-        # Determine taskset arguments based on pinning strategy using topology
-        if pinning == PinningStrategy.NONE:
-            cpu_taskset = ""
-            mem_taskset = ""
-        elif pinning == PinningStrategy.SPREAD:
-            # Use split_hyperthreads to spread across all cores
-            try:
-                cpu_list, mem_list = self.topology.split_hyperthreads()
-                cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
-                mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
-                print(f"SPREAD strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
-            except ValueError as e:
-                print(f"Warning: Could not split hyperthreads ({e}), falling back to no pinning")
-                cpu_taskset = ""
-                mem_taskset = ""
-        elif pinning == PinningStrategy.HALF:
-            # Use split_l3s to occupy only half of the cores physically
-            try:
-                _, cpu_list, mem_list = self.topology.split_physical()
-                cpu_taskset = f"--taskset {','.join(map(str, cpu_list))}"
-                mem_taskset = f"--taskset {','.join(map(str, mem_list))}"
-                print(f"HALF strategy: CPU cores {cpu_list}, MEM cores {mem_list}")
-            except ValueError as e:
-                print(f"Warning: Could not split L3s ({e}), falling back to no pinning")
-                cpu_taskset = ""
-                mem_taskset = ""
-        else:
-            raise ValueError(f"Unknown pinning strategy: {pinning}")
-
-        # Create script content based on workload with run-specific YAML files
-        cpu_yaml = run_dir / "metrics_cpu.yaml"
-        mem_yaml = run_dir / "metrics_mem.yaml"
-
-        # Get abstracted stress-ng parameters
-        cpu_params = self._get_cpu_stress_params(P)
-        mem_params = self._get_mem_stress_params(P)
-
-        if workload == WorkloadType.BOTH:
-            script_content = f"""#!/bin/bash
-set -xeuo pipefail
-(stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
-   {cpu_params} {cpu_taskset}) &
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
-    {mem_params} {mem_taskset};
-"""
-        elif workload == WorkloadType.CPU:
-            script_content = f"""#!/bin/bash
-set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {cpu_yaml} \\
-   {cpu_params} {cpu_taskset};
-"""
-        elif workload == WorkloadType.MEM:
-            script_content = f"""#!/bin/bash
-set -xeuo pipefail
-stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
-   {mem_params} {mem_taskset};
-"""
-        else:
-            raise ValueError(f"Unknown workload: {workload}")
-
-        return script_content
 
     def _get_kernel_version(self) -> str:
         """Get kernel version from uname -r."""
@@ -404,11 +502,12 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
 
         # Parse stress-ng YAML files from run directory
         if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_yaml = run_dir / "metrics_cpu.yaml"
+            cpu_yaml = run_dir / "metrics_cpu_0.yaml"
             cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
 
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            mem_yaml = run_dir / "metrics_mem.yaml"
+            # For BOTH workload, memory is at index 0. For MEM only, it's also at index 0
+            mem_yaml = run_dir / "metrics_mem_0.yaml"
             mem_metrics = self._parse_stress_yaml(str(mem_yaml))
 
         # Parse perf JSON output
@@ -699,11 +798,11 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         mem_metrics: Optional[StressMetrics] = None
 
         if params.workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_yaml = run_dir / "metrics_cpu.yaml"
+            cpu_yaml = run_dir / "metrics_cpu_0.yaml"
             cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
 
         if params.workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            mem_yaml = run_dir / "metrics_mem.yaml"
+            mem_yaml = run_dir / "metrics_mem_0.yaml"
             mem_metrics = self._parse_stress_yaml(str(mem_yaml))
 
         # Parse perf JSON output
@@ -841,7 +940,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                     if len(row) > 0:
                         cpu_values.append(float(row['cpu_normalized'].iloc[0]))
                         mem_values.append(float(row['mem_normalized'].iloc[0]))
-                        
+
                         # Calculate cache miss rate
                         cache_refs = float(row['cache_refs'].iloc[0])
                         cache_misses = float(row['cache_misses'].iloc[0])
@@ -880,7 +979,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                                cpu_val + mem_val/2,
                                f'{mem_val:.0f}%', ha='center', va='center',
                                fontweight='bold', fontsize=9, color='white')
-                    
+
                     # Cache miss rate label at bottom of bar
                     if miss_rate > 0:
                         ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 3,
