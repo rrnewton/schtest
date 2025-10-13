@@ -124,12 +124,8 @@ class PerfMetrics:
     """Typed structure for perf metrics"""
     instructions: float
     cycles: float
-    l1_cache_refs: float
-    l1_cache_misses: float
-    l2_cache_refs: float
-    l2_cache_misses: float
-    l3_cache_refs: float
-    l3_cache_misses: float
+    l1_dcache_loads: float
+    l1_dcache_load_misses: float
 
 @dataclass
 class ExperimentResult:
@@ -143,12 +139,8 @@ class ExperimentResult:
     real_time_mem: float
     instructions: float
     cycles: float
-    l1_cache_refs: float
-    l1_cache_misses: float
-    l2_cache_refs: float
-    l2_cache_misses: float
-    l3_cache_refs: float
-    l3_cache_misses: float
+    l1_dcache_loads: float
+    l1_dcache_load_misses: float
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for CSV serialization."""
@@ -162,12 +154,8 @@ class ExperimentResult:
             'real_time_mem': self.real_time_mem,
             'instructions': self.instructions,
             'cycles': self.cycles,
-            'l1_cache_refs': self.l1_cache_refs,
-            'l1_cache_misses': self.l1_cache_misses,
-            'l2_cache_refs': self.l2_cache_refs,
-            'l2_cache_misses': self.l2_cache_misses,
-            'l3_cache_refs': self.l3_cache_refs,
-            'l3_cache_misses': self.l3_cache_misses
+            'l1_dcache_loads': self.l1_dcache_loads,
+            'l1_dcache_load_misses': self.l1_dcache_load_misses
         })
         return result
 
@@ -391,7 +379,7 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         perf_output_file = run_dir / "perf.json"
         perf_cmd = [
             "perf", "stat", "-j",
-            "-e", "instructions,cycles,cache-references,cache-misses,L1-dcache-load-misses,all_l2_cache_misses,l3_lookup_state.l3_miss",
+            "-e", "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses",
             str(stress_script)
         ]
 
@@ -440,12 +428,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
             instructions=perf_metrics.instructions,
             cycles=perf_metrics.cycles,
-            l1_cache_refs=perf_metrics.l1_cache_refs,
-            l1_cache_misses=perf_metrics.l1_cache_misses,
-            l2_cache_refs=perf_metrics.l2_cache_refs,
-            l2_cache_misses=perf_metrics.l2_cache_misses,
-            l3_cache_refs=perf_metrics.l3_cache_refs,
-            l3_cache_misses=perf_metrics.l3_cache_misses,
+            l1_dcache_loads=perf_metrics.l1_dcache_loads,
+            l1_dcache_load_misses=perf_metrics.l1_dcache_load_misses,
         )
 
         # Save params.yaml to mark run as complete
@@ -484,12 +468,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
         default_metrics = PerfMetrics(
             instructions=0,
             cycles=0,
-            l1_cache_refs=0,
-            l1_cache_misses=0,
-            l2_cache_refs=0,
-            l2_cache_misses=0,
-            l3_cache_refs=0,
-            l3_cache_misses=0
+            l1_dcache_loads=0,
+            l1_dcache_load_misses=0
         )
 
         if not json_file.exists():
@@ -504,14 +484,10 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                     return default_metrics
 
                 # Parse line by line since perf outputs one JSON object per line
-                instructions = 0
-                cycles = 0
-                l1_cache_refs = 0  # cache-references (L1)
-                l1_cache_misses = 0  # cache-misses or L1-dcache-load-misses
-                l2_cache_refs = 0  # Will be derived from L1 misses
-                l2_cache_misses = 0  # all_l2_cache_misses
-                l3_cache_refs = 0  # Will be derived from L2 misses
-                l3_cache_misses = 0  # l3_lookup_state.l3_miss
+                instructions = 0.0
+                cycles = 0.0
+                l1_dcache_loads = 0.0
+                l1_dcache_load_misses = 0.0
 
                 for line in content.split('\n'):
                     line = line.strip()
@@ -521,39 +497,30 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                         data = json.loads(line)
                         if 'counter-value' in data and 'event' in data:
                             event = data['event']
-                            value = data['counter-value']
+                            value_str = data['counter-value']
+                            
+                            # Skip if not counted
+                            if value_str == '<not counted>' or value_str == '<not supported>':
+                                continue
+                                
+                            value = float(value_str)
 
                             if event == 'instructions':
                                 instructions = value
                             elif event == 'cycles':
                                 cycles = value
-                            elif event == 'cache-references':
-                                l1_cache_refs = value
-                            elif event == 'cache-misses' or event == 'L1-dcache-load-misses':
-                                # Use whichever is available
-                                if value > 0:
-                                    l1_cache_misses = value
-                            elif event == 'all_l2_cache_misses':
-                                l2_cache_misses = value
-                            elif event == 'l3_lookup_state.l3_miss':
-                                l3_cache_misses = value
-                    except json.JSONDecodeError:
-                        continue  # Skip non-JSON lines
-
-                # L2 cache refs are approximately L1 misses (what goes to L2)
-                l2_cache_refs = l1_cache_misses
-                # L3 cache refs are approximately L2 misses (what goes to L3)
-                l3_cache_refs = l2_cache_misses
+                            elif event == 'L1-dcache-loads':
+                                l1_dcache_loads = value
+                            elif event == 'L1-dcache-load-misses':
+                                l1_dcache_load_misses = value
+                    except (json.JSONDecodeError, ValueError):
+                        continue  # Skip non-JSON lines or invalid values
 
                 return PerfMetrics(
                     instructions=instructions,
                     cycles=cycles,
-                    l1_cache_refs=l1_cache_refs,
-                    l1_cache_misses=l1_cache_misses,
-                    l2_cache_refs=l2_cache_refs,
-                    l2_cache_misses=l2_cache_misses,
-                    l3_cache_refs=l3_cache_refs,
-                    l3_cache_misses=l3_cache_misses
+                    l1_dcache_loads=l1_dcache_loads,
+                    l1_dcache_load_misses=l1_dcache_load_misses
                 )
 
         except Exception as e:
@@ -760,12 +727,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
             real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
             instructions=perf_metrics.instructions,
             cycles=perf_metrics.cycles,
-            l1_cache_refs=perf_metrics.l1_cache_refs,
-            l1_cache_misses=perf_metrics.l1_cache_misses,
-            l2_cache_refs=perf_metrics.l2_cache_refs,
-            l2_cache_misses=perf_metrics.l2_cache_misses,
-            l3_cache_refs=perf_metrics.l3_cache_refs,
-            l3_cache_misses=perf_metrics.l3_cache_misses,
+            l1_dcache_loads=perf_metrics.l1_dcache_loads,
+            l1_dcache_load_misses=perf_metrics.l1_dcache_load_misses,
         )
 
     def _load_all_results(self) -> List[ExperimentResult]:
@@ -878,8 +841,6 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                 cpu_values: List[float] = []
                 mem_values: List[float] = []
                 l1_miss_rates: List[float] = []
-                l2_miss_rates: List[float] = []
-                l3_miss_rates: List[float] = []
 
                 for workload in workloads:
                     row = subset[subset['workload'] == workload]
@@ -887,27 +848,17 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                         cpu_values.append(float(row['cpu_normalized'].iloc[0]))
                         mem_values.append(float(row['mem_normalized'].iloc[0]))
                         
-                        # Calculate cache miss rates for each level
-                        l1_refs = float(row['l1_cache_refs'].iloc[0])
-                        l1_misses = float(row['l1_cache_misses'].iloc[0])
-                        l2_refs = float(row['l2_cache_refs'].iloc[0])
-                        l2_misses = float(row['l2_cache_misses'].iloc[0])
-                        l3_refs = float(row['l3_cache_refs'].iloc[0])
-                        l3_misses = float(row['l3_cache_misses'].iloc[0])
+                        # Calculate L1 dcache miss rate
+                        l1_loads = float(row['l1_dcache_loads'].iloc[0])
+                        l1_misses = float(row['l1_dcache_load_misses'].iloc[0])
                         
-                        l1_miss_rate = (l1_misses / l1_refs * 100) if l1_refs > 0 else 0.0
-                        l2_miss_rate = (l2_misses / l2_refs * 100) if l2_refs > 0 else 0.0
-                        l3_miss_rate = (l3_misses / l3_refs * 100) if l3_refs > 0 else 0.0
+                        l1_miss_rate = (l1_misses / l1_loads * 100) if l1_loads > 0 else 0.0
                         
                         l1_miss_rates.append(l1_miss_rate)
-                        l2_miss_rates.append(l2_miss_rate)
-                        l3_miss_rates.append(l3_miss_rate)
                     else:
                         cpu_values.append(0.0)
                         mem_values.append(0.0)
                         l1_miss_rates.append(0.0)
-                        l2_miss_rates.append(0.0)
-                        l3_miss_rates.append(0.0)
 
                 # Create stacked bars with consistent colors
                 x_offset = x_pos + i * width
@@ -921,8 +872,8 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                                 edgecolor='black', linewidth=0.5)
 
                 # Add percentage labels on bars
-                for j, (cpu_bar, mem_bar, cpu_val, mem_val, l1_miss, l2_miss, l3_miss) in enumerate(zip(
-                        cpu_bars, mem_bars, cpu_values, mem_values, l1_miss_rates, l2_miss_rates, l3_miss_rates)):
+                for j, (cpu_bar, mem_bar, cpu_val, mem_val, l1_miss) in enumerate(zip(
+                        cpu_bars, mem_bars, cpu_values, mem_values, l1_miss_rates)):
                     # CPU label (middle of CPU portion)
                     if cpu_val > 5:  # Only show label if bar is tall enough
                         ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, cpu_val/2,
@@ -936,19 +887,11 @@ stress-ng --metrics -t {EXPERIMENT_DURATION} --yaml {mem_yaml} \\
                                f'{mem_val:.0f}%', ha='center', va='center',
                                fontweight='bold', fontsize=9, color='white')
                     
-                    # Cache miss rate labels at bottom of bar (show L2 and L3)
-                    # L2 is typically most interesting for performance analysis
-                    cache_label_lines = []
-                    if l2_miss > 0:
-                        cache_label_lines.append(f'{l2_miss:.1f}% L2miss')
-                    if l3_miss > 0:
-                        cache_label_lines.append(f'{l3_miss:.1f}% L3miss')
-                    
-                    if cache_label_lines:
-                        cache_label = '\n'.join(cache_label_lines)
+                    # L1 dcache miss rate label at bottom of bar
+                    if l1_miss > 0:
                         ax.text(cpu_bar.get_x() + cpu_bar.get_width()/2, 3,
-                               cache_label, ha='center', va='bottom',
-                               fontsize=6, color='yellow', fontweight='bold',
+                               f'{l1_miss:.1f}% L1miss', ha='center', va='bottom',
+                               fontsize=7, color='yellow', fontweight='bold',
                                bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7, edgecolor='none'))
 
                 # Add combined throughput labels on top of all bars
