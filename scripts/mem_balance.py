@@ -213,11 +213,28 @@ class Stressor(ABC):
         return self
 
     @abstractmethod
-    def create_script(self) -> str:
-        """Generate the bash script content for this stressor configuration.
-
+    def execute(self) -> Tuple[Optional['StressMetrics'], Optional['StressMetrics']]:
+        """Execute the stress test and return (cpu_metrics, mem_metrics).
+        
+        This method should:
+        1. Generate the stress test script
+        2. Execute the script
+        3. Parse the results
+        4. Return the metrics
+        
         Returns:
-            Bash script content as a string
+            Tuple of (cpu_metrics, mem_metrics) where each can be None if not applicable
+        """
+        pass
+    
+    @abstractmethod
+    def get_metrics(self) -> Tuple[Optional['StressMetrics'], Optional['StressMetrics']]:
+        """Parse and return metrics from already-executed stress test.
+        
+        This is used for loading results from disk without re-executing.
+        
+        Returns:
+            Tuple of (cpu_metrics, mem_metrics) where each can be None if not applicable
         """
         pass
 
@@ -252,7 +269,7 @@ class StressNGStressor(Stressor):
         keep = '--vm-keep' if kwargs.get('keep', True) else ''
         return f"--vm {count} {keep} --vm-method {method} --vm-bytes {bytes_per_worker}"
 
-    def create_script(self) -> str:
+    def _create_script(self) -> str:
         """Generate bash script for stress-ng configuration."""
         script_lines = ["#!/bin/bash", "set -xeuo pipefail"]
 
@@ -283,6 +300,66 @@ class StressNGStressor(Stressor):
             script_lines.append(f"{cmd};")
 
         return "\n".join(script_lines) + "\n"
+    
+    def _parse_yaml(self, yaml_file: Path) -> Optional[StressMetrics]:
+        """Parse a stress-ng YAML output file."""
+        if not yaml_file.exists():
+            return None
+        try:
+            with open(yaml_file, 'r') as f:
+                data = yaml.safe_load(f)
+            metrics_list = data.get('metrics', [{}])
+            if not metrics_list or not isinstance(metrics_list, list):
+                return None
+            metrics = metrics_list[0]
+            return StressMetrics(
+                bogo_ops=metrics.get('bogo-ops', 0),
+                bogo_ops_per_sec_cpu_time=metrics.get('bogo-ops-per-second-usr-sys-time', 0.0),
+                real_time=metrics.get('wall-clock-time', 0.0)
+            )
+        except Exception as e:
+            print(f"Error parsing YAML file {yaml_file}: {e}")
+            return None
+
+    def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Execute the stress test and return metrics."""
+        # Generate and write script
+        script_content = self._create_script()
+        script_file = self.output_dir / "stress.sh"
+        with open(script_file, 'w') as f:
+            f.write(script_content)
+        os.chmod(script_file, 0o755)
+        
+        # Execute script
+        result = subprocess.run(
+            [str(script_file)],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            print(f"Warning: Stress test failed with return code {result.returncode}")
+            print(f"stderr: {result.stderr}")
+        
+        # Parse and return metrics
+        return self.get_metrics()
+    
+    def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Parse and return metrics from already-executed stress test."""
+        cpu_metrics = None
+        mem_metrics = None
+        
+        # Check for CPU metrics based on whether CPU stressors were added
+        if self.cpu_stressors:
+            cpu_yaml = self.output_dir / "metrics_cpu_0.yaml"
+            cpu_metrics = self._parse_yaml(cpu_yaml)
+        
+        # Check for memory metrics based on whether memory stressors were added
+        if self.mem_stressors:
+            mem_yaml = self.output_dir / "metrics_mem_0.yaml"
+            mem_metrics = self._parse_yaml(mem_yaml)
+        
+        return cpu_metrics, mem_metrics
 
 
 class ExperimentRunner:
@@ -402,9 +479,8 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
-    def _create_stress_script(self, workload: WorkloadType, pinning: PinningStrategy,
-                             scheduler: SchedulerType, run_dir: Path) -> str:
-        """Create stress.sh script for given configuration using StressNGStressor."""
+    def _create_stressor(self, workload: WorkloadType, pinning: PinningStrategy, run_dir: Path) -> StressNGStressor:
+        """Create and configure stressor for given configuration."""
         P = self.num_cores
 
         # Get CPU lists based on pinning strategy
@@ -420,7 +496,7 @@ class ExperimentRunner:
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
             stressor.add_mem_stressor(P, mem_list, method='ror', bytes_per_worker=f'{P}g', keep=True)
 
-        return stressor.create_script()
+        return stressor
 
     def _stop_current_scheduler(self) -> None:
         """Stop the currently active scheduler."""
@@ -463,18 +539,15 @@ class ExperimentRunner:
 
         print(f"Run directory: {run_dir}")
 
-        # Create and write stress script in run directory
-        stress_script = run_dir / "stress.sh"
-        script_content = self._create_stress_script(workload, pinning, scheduler, run_dir)
-        with open(stress_script, 'w') as f:
-            f.write(script_content)
-        os.chmod(stress_script, 0o755)
+        # Create and configure stressor
+        stressor = self._create_stressor(workload, pinning, run_dir)
 
         # Ensure correct scheduler is active (lazy switching)
         self._ensure_scheduler(scheduler)
 
-        # Run experiment with perf in run directory
+        # Run experiment with perf wrapping the stressor execution
         perf_output_file = run_dir / "perf.json"
+        stress_script = run_dir / "stress.sh"
         perf_cmd = [
             "perf", "stat", "-j",
             "-e", "instructions,cycles,cache-references,cache-misses",
@@ -483,7 +556,13 @@ class ExperimentRunner:
 
         print(f"Running: {' '.join(perf_cmd)}")
 
-        # Run the experiment
+        # Execute stressor (generates script) but wrap with perf for the actual execution
+        script_content = stressor._create_script()
+        with open(stress_script, 'w') as f:
+            f.write(script_content)
+        os.chmod(stress_script, 0o755)
+
+        # Run with perf
         with open(perf_output_file, 'w') as perf_file:
             result = subprocess.run(
                 perf_cmd,
@@ -496,19 +575,8 @@ class ExperimentRunner:
             print(f"Warning: Experiment failed with return code {result.returncode}")
             print(f"stdout: {result.stdout}")
 
-        # Parse results
-        cpu_metrics: Optional[StressMetrics] = None
-        mem_metrics: Optional[StressMetrics] = None
-
-        # Parse stress-ng YAML files from run directory
-        if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_yaml = run_dir / "metrics_cpu_0.yaml"
-            cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
-
-        if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            # For BOTH workload, memory is at index 0. For MEM only, it's also at index 0
-            mem_yaml = run_dir / "metrics_mem_0.yaml"
-            mem_metrics = self._parse_stress_yaml(str(mem_yaml))
+        # Parse results using stressor abstraction
+        cpu_metrics, mem_metrics = stressor.get_metrics()
 
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
@@ -542,25 +610,40 @@ class ExperimentRunner:
 
         return experiment_result
 
-    def _parse_stress_yaml(self, yaml_file: str) -> Optional[StressMetrics]:
-        """Parse stress-ng YAML output file."""
-        if not os.path.exists(yaml_file):
-            print(f"YAML file not found: {yaml_file}")
-            return None
+        # Parse perf JSON output
+        perf_metrics = self._parse_perf_json(perf_output_file)
 
-        try:
-            with open(yaml_file, 'r') as f:
-                data = yaml.safe_load(f)
+        # Create experiment parameters
+        params = self._create_experiment_params(workload, pinning, scheduler)
 
-            metrics = data.get('metrics', [{}])[0]
-            return StressMetrics(
-                bogo_ops=metrics.get('bogo-ops', 0),
-                bogo_ops_per_sec_cpu_time=metrics.get('bogo-ops-per-second-usr-sys-time', 0.0),
-                real_time=metrics.get('wall-clock-time', 0.0)
-            )
-        except Exception as e:
-            print(f"Error parsing YAML file {yaml_file}: {e}")
-            return None
+        # Create typed result
+        experiment_result = ExperimentResult(
+            params=params,
+            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
+            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
+            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
+            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
+            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
+            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
+            instructions=perf_metrics.instructions,
+            cycles=perf_metrics.cycles,
+            cache_refs=perf_metrics.cache_refs,
+            cache_misses=perf_metrics.cache_misses,
+        )
+
+        # Save params.yaml to mark run as complete
+        params_file = run_dir / "params.yaml"
+        with open(params_file, 'w') as f:
+            yaml.dump(params.to_dict(), f, default_flow_style=False)
+        print(f"Saved params to {params_file}")
+
+        # Increment run counter for next experiment
+        self.run_counter += 1
+
+        return experiment_result
+
+
+    # Stress-ng parsing is now handled by StressNGStressor
 
     def _parse_perf_json(self, json_file: Path) -> PerfMetrics:
         """Parse perf stat JSON output."""
@@ -793,17 +876,28 @@ class ExperimentRunner:
         if not params:
             return None
 
-        # Parse stress-ng YAML files
-        cpu_metrics: Optional[StressMetrics] = None
-        mem_metrics: Optional[StressMetrics] = None
+        # Create stressor configured for this workload type (for metrics parsing)
+        stressor = self._create_stressor(params.workload, params.pinning, run_dir)
+        cpu_metrics, mem_metrics = stressor.get_metrics()
 
-        if params.workload in [WorkloadType.BOTH, WorkloadType.CPU]:
-            cpu_yaml = run_dir / "metrics_cpu_0.yaml"
-            cpu_metrics = self._parse_stress_yaml(str(cpu_yaml))
+        # Parse perf JSON output
+        perf_output_file = run_dir / "perf.json"
+        perf_metrics = self._parse_perf_json(perf_output_file)
 
-        if params.workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            mem_yaml = run_dir / "metrics_mem_0.yaml"
-            mem_metrics = self._parse_stress_yaml(str(mem_yaml))
+        # Create result
+        return ExperimentResult(
+            params=params,
+            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
+            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
+            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
+            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
+            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
+            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
+            instructions=perf_metrics.instructions,
+            cycles=perf_metrics.cycles,
+            cache_refs=perf_metrics.cache_refs,
+            cache_misses=perf_metrics.cache_misses,
+        )
 
         # Parse perf JSON output
         perf_output_file = run_dir / "perf.json"
