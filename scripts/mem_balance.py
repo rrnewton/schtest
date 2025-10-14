@@ -176,7 +176,7 @@ class Stressor(ABC):
         self.cpu_stressors: List[Dict[str, Any]] = []
         self.mem_stressors: List[Dict[str, Any]] = []
 
-    def add_cpu_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs) -> 'Stressor':
+    def add_cpu_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs: Any) -> 'Stressor':
         """Add a CPU stress test.
 
         Args:
@@ -194,7 +194,7 @@ class Stressor(ABC):
         })
         return self
 
-    def add_mem_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs) -> 'Stressor':
+    def add_mem_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs: Any) -> 'Stressor':
         """Add a memory stress test.
 
         Args:
@@ -215,24 +215,24 @@ class Stressor(ABC):
     @abstractmethod
     def execute(self) -> Tuple[Optional['StressMetrics'], Optional['StressMetrics']]:
         """Execute the stress test and return (cpu_metrics, mem_metrics).
-        
+
         This method should:
         1. Generate the stress test script
         2. Execute the script
         3. Parse the results
         4. Return the metrics
-        
+
         Returns:
             Tuple of (cpu_metrics, mem_metrics) where each can be None if not applicable
         """
         pass
-    
+
     @abstractmethod
     def get_metrics(self) -> Tuple[Optional['StressMetrics'], Optional['StressMetrics']]:
         """Parse and return metrics from already-executed stress test.
-        
+
         This is used for loading results from disk without re-executing.
-        
+
         Returns:
             Tuple of (cpu_metrics, mem_metrics) where each can be None if not applicable
         """
@@ -257,12 +257,12 @@ class StressNGStressor(Stressor):
             return ""
         return f"--taskset {','.join(map(str, cpu_list))}"
 
-    def _get_cpu_params(self, count: int, **kwargs) -> str:
+    def _get_cpu_params(self, count: int, **kwargs: Any) -> str:
         """Get stress-ng CPU workload parameters."""
         method = kwargs.get('method', 'int64')
         return f"--cpu {count} --cpu-method {method}"
 
-    def _get_mem_params(self, count: int, **kwargs) -> str:
+    def _get_mem_params(self, count: int, **kwargs: Any) -> str:
         """Get stress-ng memory workload parameters."""
         method = kwargs.get('method', 'ror')
         bytes_per_worker = kwargs.get('bytes_per_worker', f'{count}g')
@@ -300,7 +300,7 @@ class StressNGStressor(Stressor):
             script_lines.append(f"{cmd};")
 
         return "\n".join(script_lines) + "\n"
-    
+
     def _parse_yaml(self, yaml_file: Path) -> Optional[StressMetrics]:
         """Parse a stress-ng YAML output file."""
         if not yaml_file.exists():
@@ -329,36 +329,36 @@ class StressNGStressor(Stressor):
         with open(script_file, 'w') as f:
             f.write(script_content)
         os.chmod(script_file, 0o755)
-        
+
         # Execute script
         result = subprocess.run(
             [str(script_file)],
             capture_output=True,
             text=True
         )
-        
+
         if result.returncode != 0:
             print(f"Warning: Stress test failed with return code {result.returncode}")
             print(f"stderr: {result.stderr}")
-        
+
         # Parse and return metrics
         return self.get_metrics()
-    
+
     def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
         """Parse and return metrics from already-executed stress test."""
         cpu_metrics = None
         mem_metrics = None
-        
+
         # Check for CPU metrics based on whether CPU stressors were added
         if self.cpu_stressors:
             cpu_yaml = self.output_dir / "metrics_cpu_0.yaml"
             cpu_metrics = self._parse_yaml(cpu_yaml)
-        
+
         # Check for memory metrics based on whether memory stressors were added
         if self.mem_stressors:
             mem_yaml = self.output_dir / "metrics_mem_0.yaml"
             mem_metrics = self._parse_yaml(mem_yaml)
-        
+
         return cpu_metrics, mem_metrics
 
 
@@ -610,39 +610,6 @@ class ExperimentRunner:
 
         return experiment_result
 
-        # Parse perf JSON output
-        perf_metrics = self._parse_perf_json(perf_output_file)
-
-        # Create experiment parameters
-        params = self._create_experiment_params(workload, pinning, scheduler)
-
-        # Create typed result
-        experiment_result = ExperimentResult(
-            params=params,
-            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
-            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
-            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
-            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
-            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
-            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
-            instructions=perf_metrics.instructions,
-            cycles=perf_metrics.cycles,
-            cache_refs=perf_metrics.cache_refs,
-            cache_misses=perf_metrics.cache_misses,
-        )
-
-        # Save params.yaml to mark run as complete
-        params_file = run_dir / "params.yaml"
-        with open(params_file, 'w') as f:
-            yaml.dump(params.to_dict(), f, default_flow_style=False)
-        print(f"Saved params to {params_file}")
-
-        # Increment run counter for next experiment
-        self.run_counter += 1
-
-        return experiment_result
-
-
     # Stress-ng parsing is now handled by StressNGStressor
 
     def _parse_perf_json(self, json_file: Path) -> PerfMetrics:
@@ -879,25 +846,6 @@ class ExperimentRunner:
         # Create stressor configured for this workload type (for metrics parsing)
         stressor = self._create_stressor(params.workload, params.pinning, run_dir)
         cpu_metrics, mem_metrics = stressor.get_metrics()
-
-        # Parse perf JSON output
-        perf_output_file = run_dir / "perf.json"
-        perf_metrics = self._parse_perf_json(perf_output_file)
-
-        # Create result
-        return ExperimentResult(
-            params=params,
-            bogo_cpu=cpu_metrics.bogo_ops if cpu_metrics else 0,
-            bogo_cpu_persec=cpu_metrics.bogo_ops_per_sec_cpu_time if cpu_metrics else 0.0,
-            real_time_cpu=cpu_metrics.real_time if cpu_metrics else 0.0,
-            bogo_mem=mem_metrics.bogo_ops if mem_metrics else 0,
-            bogo_mem_persec=mem_metrics.bogo_ops_per_sec_cpu_time if mem_metrics else 0.0,
-            real_time_mem=mem_metrics.real_time if mem_metrics else 0.0,
-            instructions=perf_metrics.instructions,
-            cycles=perf_metrics.cycles,
-            cache_refs=perf_metrics.cache_refs,
-            cache_misses=perf_metrics.cache_misses,
-        )
 
         # Parse perf JSON output
         perf_output_file = run_dir / "perf.json"
