@@ -1,17 +1,21 @@
 //! Process management for workloads.
 
-use anyhow::{anyhow, Result};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
+
+use anyhow::Result;
+use anyhow::anyhow;
 use libc;
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
-use std::sync::atomic::{AtomicU32, Ordering};
+use util::cgroups::Cgroup;
+use util::child::Child;
+use util::sched::Sched;
+use util::sched::SchedStats;
+use util::shared::SharedBox;
 
-use crate::util::cgroups::Cgroup;
-use crate::util::child::Child;
-use crate::util::sched::{Sched, SchedStats};
-use crate::util::shared::SharedBox;
-use crate::workloads::context::Context;
-use crate::workloads::semaphore::Semaphore;
+use crate::context::Context;
+use crate::semaphore::Semaphore;
 
 /// A spec for a process to be started.
 #[derive(Default)]
@@ -219,19 +223,28 @@ impl Drop for Process {
 macro_rules! process {
     ($ctx:expr, $spec:expr, ($($var:ident),*), $func:expr) => {{
         $(let $var = $var.clone();)*
-        let p = $crate::workloads::process::Process::create($ctx, $func, $spec)?;
+        let p = $crate::process::Process::create($ctx, $func, $spec)?;
         $ctx.add(p)
     }};
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
+
+    use util::user::User;
+
     use super::*;
-    use crate::workloads::context::Context;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use crate::context::Context;
 
     #[test]
     fn test_process_iterations() -> Result<()> {
+        // Skip if not root.
+        if !User::is_root() {
+            return Ok(());
+        }
+
         let ctx = Context::create()?;
         let iter_count = ctx.allocate(AtomicU32::new(0))?;
         let iter_values = ctx.allocate_vec(2, |_| AtomicU32::new(0))?;

@@ -3,11 +3,19 @@
 use std::ffi::CString;
 use std::io;
 use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::AsRawFd;
+use std::os::fd::BorrowedFd;
+use std::os::fd::RawFd;
 
-use libc::{c_char, c_int, c_uint};
-use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
-use nix::unistd::{close, ftruncate};
+use libc::c_char;
+use libc::c_int;
+use libc::c_uint;
+use nix::sys::mman::MapFlags;
+use nix::sys::mman::ProtFlags;
+use nix::sys::mman::mmap;
+use nix::sys::mman::munmap;
+use nix::unistd::close;
+use nix::unistd::ftruncate;
 
 /// A memory-backed file descriptor (memfd).
 ///
@@ -19,7 +27,7 @@ pub struct MemFd {
     size: usize,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
 }
 
@@ -69,7 +77,7 @@ impl MemFd {
                 NonZeroUsize::new(rounded_up).unwrap(),
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_SHARED,
-                Some(BorrowedFd::borrow_raw(fd)),
+                BorrowedFd::borrow_raw(fd),
                 0,
             )
             .map_err(|e| {
@@ -80,7 +88,7 @@ impl MemFd {
 
         Ok(MemFd {
             fd,
-            data: data as *mut u8,
+            data: data.as_ptr() as *mut u8,
             size: rounded_up,
         })
     }
@@ -106,7 +114,10 @@ impl Drop for MemFd {
     fn drop(&mut self) {
         if !self.data.is_null() {
             unsafe {
-                let _ = munmap(self.data as *mut _, self.size);
+                let _ = munmap(
+                    std::ptr::NonNull::new(self.data as *mut libc::c_void).unwrap(),
+                    self.size,
+                );
             }
         }
 

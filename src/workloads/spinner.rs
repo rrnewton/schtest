@@ -1,6 +1,7 @@
 //! Spinner workload implementation.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// A workload that spins for a specified duration.
@@ -47,19 +48,17 @@ impl Spinner {
     /// information is not available.
     fn get_current_cpu() -> Option<u32> {
         let cpu = unsafe { libc::sched_getcpu() };
-        if cpu >= 0 {
-            Some(cpu as u32)
-        } else {
-            None
-        }
+        if cpu >= 0 { Some(cpu as u32) } else { None }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use anyhow::Result;
     use std::time::Duration;
+
+    use anyhow::Result;
+
+    use super::*;
 
     #[test]
     fn test_spinner() -> Result<()> {

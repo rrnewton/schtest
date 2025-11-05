@@ -5,15 +5,15 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+use util::system::CPUSet;
+use util::system::System;
+use workloads::context::Context;
+use workloads::converge;
+use workloads::process;
+use workloads::semaphore::Semaphore;
+use workloads::spinner::Spinner;
 
 use crate::test;
-use crate::util::system::{CPUSet, System};
-use crate::workloads::context::Context;
-use crate::workloads::semaphore::Semaphore;
-use crate::workloads::spinner::Spinner;
-
-use crate::converge;
-use crate::process;
 
 /// Test that verifies the scheduler spreads threads across physical cores.
 ///
@@ -138,8 +138,10 @@ fn come_together() -> Result<()> {
             std::thread::scope(|s| {
                 for spinner in proc_spinners.iter() {
                     let spinner_clone = spinner.clone();
-                    s.spawn(move || loop {
-                        spinner_clone.spin(Duration::from_millis(1));
+                    s.spawn(move || {
+                        loop {
+                            spinner_clone.spin(Duration::from_millis(1));
+                        }
                     });
                 }
                 loop {
@@ -169,14 +171,10 @@ fn come_together() -> Result<()> {
                 for spinner in spinner_set {
                     let cpu = spinner.last_cpu() as i32;
                     let local_complex = logical_to_physical[&cpu];
-                    match complex {
-                        Some(c) if c != local_complex => {
-                            mismatches += 1;
-                        }
-                        Some(_) => {}
-                        None => {
-                            complex = Some(local_complex);
-                        }
+                    if complex.is_none() {
+                        complex = Some(local_complex);
+                    } else if complex.unwrap() != local_complex {
+                        mismatches += 1;
                     }
                     total += 1;
                 }
