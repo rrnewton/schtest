@@ -13,6 +13,10 @@ use util::child::Child;
 use util::sched::SchedExt;
 use util::user::User;
 
+mod cases;
+mod util;
+mod workloads;
+
 /// Command line arguments for the schtest binary.
 #[derive(Parser, Debug)]
 #[command(

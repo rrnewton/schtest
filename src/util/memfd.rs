@@ -77,7 +77,7 @@ impl MemFd {
                 NonZeroUsize::new(rounded_up).unwrap(),
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_SHARED,
-                BorrowedFd::borrow_raw(fd),
+                Some(BorrowedFd::borrow_raw(fd)),
                 0,
             )
             .map_err(|e| {
@@ -88,7 +88,7 @@ impl MemFd {
 
         Ok(MemFd {
             fd,
-            data: data.as_ptr() as *mut u8,
+            data: data as *mut u8,
             size: rounded_up,
         })
     }
@@ -115,7 +115,7 @@ impl Drop for MemFd {
         if !self.data.is_null() {
             unsafe {
                 let _ = munmap(
-                    std::ptr::NonNull::new(self.data as *mut libc::c_void).unwrap(),
+                    self.data as *mut libc::c_void,
                     self.size,
                 );
             }

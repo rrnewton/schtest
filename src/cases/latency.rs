@@ -4,15 +4,15 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use util::stats::Distribution;
-use util::system::CPUMask;
-use util::system::CPUSet;
-use util::system::System;
-use workloads::benchmark::converge;
-use workloads::context::Context;
-use workloads::process;
-use workloads::semaphore::Semaphore;
-use workloads::spinner::Spinner;
+use crate::util::stats::Distribution;
+use crate::util::system::CPUMask;
+use crate::util::system::CPUSet;
+use crate::util::system::System;
+use crate::workloads::benchmark::converge;
+use crate::workloads::context::Context;
+use crate::process;
+use crate::workloads::semaphore::Semaphore;
+use crate::workloads::spinner::Spinner;
 
 use crate::test;
 

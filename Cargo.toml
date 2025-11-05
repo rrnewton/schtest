@@ -31,9 +31,9 @@ procfs = "0.17"
 [dev-dependencies]
 rstest = "0.18"
 
-[lib]
-name = "schtest"
-path = "src/lib.rs"
+# [lib]
+# name = "schtest"
+# path = "src/lib.rs"
 
 [[bin]]
 name = "schtest"

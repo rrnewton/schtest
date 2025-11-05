@@ -5,12 +5,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use util::shared::BumpAllocator;
-use util::shared::SharedBox;
-use util::shared::SharedVec;
+use crate::util::shared::BumpAllocator;
+use crate::util::shared::SharedBox;
+use crate::util::shared::SharedVec;
 
-use crate::process::Process;
-use crate::process::ProcessHandle;
+use crate::workloads::process::Process;
+use crate::workloads::process::ProcessHandle;
 
 /// Whether the context is running.
 #[derive(Clone)]

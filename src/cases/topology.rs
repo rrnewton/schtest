@@ -5,13 +5,13 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use util::system::CPUSet;
-use util::system::System;
-use workloads::context::Context;
-use workloads::converge;
-use workloads::process;
-use workloads::semaphore::Semaphore;
-use workloads::spinner::Spinner;
+use crate::util::system::CPUSet;
+use crate::util::system::System;
+use crate::workloads::context::Context;
+use crate::converge;
+use crate::process;
+use crate::workloads::semaphore::Semaphore;
+use crate::workloads::spinner::Spinner;
 
 use crate::test;
 

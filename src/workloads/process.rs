@@ -8,14 +8,14 @@ use anyhow::anyhow;
 use libc;
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
-use util::cgroups::Cgroup;
-use util::child::Child;
-use util::sched::Sched;
-use util::sched::SchedStats;
-use util::shared::SharedBox;
+use crate::util::cgroups::Cgroup;
+use crate::util::child::Child;
+use crate::util::sched::Sched;
+use crate::util::sched::SchedStats;
+use crate::util::shared::SharedBox;
 
-use crate::context::Context;
-use crate::semaphore::Semaphore;
+use crate::workloads::context::Context;
+use crate::workloads::semaphore::Semaphore;
 
 /// A spec for a process to be started.
 #[derive(Default)]
@@ -223,7 +223,7 @@ impl Drop for Process {
 macro_rules! process {
     ($ctx:expr, $spec:expr, ($($var:ident),*), $func:expr) => {{
         $(let $var = $var.clone();)*
-        let p = $crate::process::Process::create($ctx, $func, $spec)?;
+        let p = $crate::workloads::process::Process::create($ctx, $func, $spec)?;
         $ctx.add(p)
     }};
 }

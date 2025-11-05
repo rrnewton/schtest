@@ -7,9 +7,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use libc;
-use util::clock::SplitTimer;
-use util::stats::Distribution;
-use util::stats::ReservoirSampler;
+use crate::util::clock::SplitTimer;
+use crate::util::stats::Distribution;
+use crate::util::stats::ReservoirSampler;
 
 /// A lock-free semaphore for synchronizing threads.
 pub struct Semaphore<const S: usize = 256, const R: usize = 1024> {

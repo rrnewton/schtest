@@ -2,8 +2,7 @@
 
 use std::ffi::CString;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::io::BorrowedFd;
-use std::os::unix::io::OwnedFd;
+use std::os::unix::io::RawFd;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -17,7 +16,7 @@ use nix::sys::wait::WaitStatus;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
 
-use crate::user::User;
+use crate::util::user::User;
 
 /// A wrapper around a notification file descriptor.
 ///
@@ -25,10 +24,10 @@ use crate::user::User;
 /// parent and child processes.
 struct NotificationFd {
     /// The read end of the notification pipe.
-    read_fd: Option<OwnedFd>,
+    read_fd: Option<RawFd>,
 
     /// The write end of the notification pipe.
-    write_fd: Option<OwnedFd>,
+    write_fd: Option<RawFd>,
 }
 
 impl NotificationFd {
@@ -127,7 +126,7 @@ impl Child {
                     // Error case: serialize the error message as a string.
                     let error_msg = error.to_string();
                     let _ = nix::unistd::write(
-                        unsafe { BorrowedFd::borrow_raw(write_fd) },
+                        write_fd,
                         error_msg.as_bytes(),
                     );
                 }
@@ -227,7 +226,7 @@ impl Child {
             let mut temp_buf = [0u8; 1024];
 
             loop {
-                match nix::unistd::read(self.notification.read_fd.as_ref().unwrap(), &mut temp_buf)
+                match nix::unistd::read(*self.notification.read_fd.as_ref().unwrap(), &mut temp_buf)
                 {
                     Ok(0) => break, // End of file.
                     Ok(n) => buffer.extend_from_slice(&temp_buf[..n]),

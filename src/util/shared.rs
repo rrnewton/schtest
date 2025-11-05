@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::anyhow;
 
-use crate::memfd::MemFd;
+use crate::util::memfd::MemFd;
 
 /// A bump allocator that uses a memfd as backing storage.
 ///

@@ -12,7 +12,7 @@ use anyhow::Result;
 use criterion::Criterion;
 use criterion::SamplingMode;
 use criterion::Throughput;
-use util::stats::Distribution;
+use crate::util::stats::Distribution;
 
 /// Represents the result of a benchmark measurement.
 pub enum BenchResult {
@@ -210,7 +210,7 @@ macro_rules! converge {
         let min_time = std::time::Duration::from_secs_f64($min);
         let max_time = std::time::Duration::from_secs_f64($max);
         let result =
-            $crate::benchmark::converge(Some(min_time), Some(max_time), Some($threshold), $measure);
+            $crate::workloads::benchmark::converge(Some(min_time), Some(max_time), Some($threshold), $measure);
         match result {
             Ok(metric) => {
                 assert!(
@@ -230,7 +230,7 @@ macro_rules! converge {
 macro_rules! measure {
     ($ctx:expr, $args:expr, $name:expr, ($($var:ident),*), $func:expr) => {{
         $(let $var = $var.clone();)*
-        $crate::benchmark::measure($args, $name, move |iters: u32| {
+        $crate::workloads::benchmark::measure($args, $name, move |iters: u32| {
             $ctx.start(iters);
             $ctx.wait()?;
             $func(iters)

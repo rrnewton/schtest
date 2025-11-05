@@ -1,5 +1,5 @@
 use anyhow::Result;
-use workloads::benchmark::BenchArgs;
+use crate::workloads::benchmark::BenchArgs;
 
 #[derive(Debug)]
 pub struct Test {
@@ -20,7 +20,7 @@ macro_rules! test {
     ($name:expr, $func:ident, ($($param:expr),+ $(,)?), $constraints:ident) => {
         $(
             inventory::submit! {
-                $crate::Test {
+                $crate::cases::Test {
                     name: || format!("{}/{}", $name, $param),
                     test_fn: |c| $func(c, $param),
                     constraints: || $constraints($param),
@@ -31,7 +31,7 @@ macro_rules! test {
     ($name:expr, $func:ident, ($($param:expr),+ $(,)?)) => {
         $(
             inventory::submit! {
-                $crate::Test {
+                $crate::cases::Test {
                     name: || format!("{}/{}", $name, $param),
                     test_fn: |c| $func(c, $param),
                     constraints: || Ok(()),
@@ -41,7 +41,7 @@ macro_rules! test {
     };
     ($name:expr, $func:ident, $constraints:ident) => {
         inventory::submit! {
-            $crate::Test {
+            $crate::cases::Test {
                 name: || $name.to_string(),
                 test_fn: || $func(),
                 constraints: || $constraints(),
@@ -50,7 +50,7 @@ macro_rules! test {
     };
     ($name:expr, $func:ident) => {
         inventory::submit! {
-            $crate::Test {
+            $crate::cases::Test {
                 name: || $name.to_string(),
                 test_fn: || $func(),
                 constraints: || Ok(())
@@ -64,7 +64,7 @@ macro_rules! benchmark {
     ($name:expr, $func:ident, ($($param:expr),+ $(,)?), $constraints:ident) => {
         $(
             inventory::submit! {
-               $crate::Benchmark {
+               $crate::cases::Benchmark {
                     name: || format!("{}/{}", $name, $param),
                     test_fn: |c| $func(c, $param),
                     constraints: || $constraints($param),
@@ -75,7 +75,7 @@ macro_rules! benchmark {
     ($name:expr, $func:ident, ($($param:expr),+ $(,)?)) => {
         $(
             inventory::submit! {
-               $crate::Benchmark {
+               $crate::cases::Benchmark {
                     name: || format!("{}/{}", $name, $param),
                     test_fn: |c| $func(c, $param),
                     constraints: || Ok(()),
@@ -85,7 +85,7 @@ macro_rules! benchmark {
     };
     ($name:expr, $func:ident, (), $constraints:ident) => {
         inventory::submit! {
-           $crate::Benchmark {
+           $crate::cases::Benchmark {
                 name: || $name.to_string(),
                 test_fn: |c| $func(c),
                 constraints: || $constraints(),
@@ -94,7 +94,7 @@ macro_rules! benchmark {
     };
     ($name:expr, $func:ident, ()) => {
         inventory::submit! {
-            $crate::Benchmark {
+            $crate::cases::Benchmark {
                 name: || $name.to_string(),
                 test_fn: |c| $func(c),
                 constraints: || Ok(()),

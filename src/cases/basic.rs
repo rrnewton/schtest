@@ -3,18 +3,18 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use util::stats::Distribution;
-use util::system::CPUMask;
-use util::system::CPUSet;
-use util::system::System;
-use workloads::benchmark::BenchArgs;
-use workloads::benchmark::BenchResult::Count;
-use workloads::benchmark::BenchResult::Latency;
-use workloads::context::Context;
-use workloads::measure;
-use workloads::process;
-use workloads::semaphore::Semaphore;
-use workloads::spinner::Spinner;
+use crate::util::stats::Distribution;
+use crate::util::system::CPUMask;
+use crate::util::system::CPUSet;
+use crate::util::system::System;
+use crate::workloads::benchmark::BenchArgs;
+use crate::workloads::benchmark::BenchResult::Count;
+use crate::workloads::benchmark::BenchResult::Latency;
+use crate::workloads::context::Context;
+use crate::measure;
+use crate::process;
+use crate::workloads::semaphore::Semaphore;
+use crate::workloads::spinner::Spinner;
 
 use crate::benchmark;
 use crate::test;
