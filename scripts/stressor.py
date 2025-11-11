@@ -134,7 +134,7 @@ class StressNGStressor(Stressor):
 
     def _get_mem_params(self, count: int, bytes_per_worker: str, **kwargs: Any) -> str:
         """Get stress-ng memory workload parameters."""
-        method = kwargs.get('method', 'ror')
+        method = kwargs.get('method', 'write64')
         keep = '--vm-keep' if kwargs.get('keep', True) else ''
         return f"--vm {count} {keep} --vm-method {method} --vm-bytes {bytes_per_worker}"
 
@@ -453,8 +453,7 @@ class RTAppStressor(Stressor):
                 thread_name = f"mem_{i}_{instance}"
                 thread_config = {
                     "loop": -1,  # Run until duration expires
-                    "mem": 10000,  # Memory operations for 10ms
-                    "sleep": 10000,  # Sleep for 10ms (50% duty cycle)
+                    "mem": mem_buffer_size,  # Write entire buffer per iteration (matches stress-ng)
                 }
 
                 # Add CPU affinity if specified
@@ -503,16 +502,80 @@ class RTAppStressor(Stressor):
         # Return None for now
         return self.get_metrics()
 
-    def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
-        """Parse and return metrics from already-executed stress test.
+    def _parse_rt_app_log(self, log_file: Path, buffer_size: Optional[int] = None) -> Optional[StressMetrics]:
+        """Parse rt-app log file to extract metrics.
 
-        Note: rt-app doesn't provide bogo-ops metrics like stress-ng.
-        This method returns None for both CPU and memory metrics.
-        If we need metrics later, we can parse rt-app's log files.
+        Args:
+            log_file: Path to rt-app log file
+            buffer_size: For memory workloads, size of buffer per iteration
+
+        Returns:
+            StressMetrics with equivalent bogo-ops, or None if file doesn't exist
         """
-        # rt-app generates log files but they don't contain bogo-ops
-        # Return None to indicate no metrics available
-        cpu_metrics = None if self.cpu_stressors else None
-        mem_metrics = None if self.mem_stressors else None
+        if not log_file.exists():
+            return None
+
+        try:
+            import pandas as pd
+            df = pd.read_csv(log_file, delim_whitespace=True, comment='#')
+
+            # rt-app logs have columns: idx, perf, run, period, start, end, rel_st, slack, c_duration, c_period, wu_lat
+            total_perf = df['perf'].sum()
+
+            # Calculate total runtime in seconds
+            if len(df) > 0:
+                start_time_us = df['start'].iloc[0]
+                end_time_us = df['end'].iloc[-1]
+                real_time = (end_time_us - start_time_us) / 1_000_000  # Convert to seconds
+            else:
+                real_time = 0.0
+
+            # For memory workloads, convert iterations to bytes written
+            # rt-app memload writes entire buffer per iteration
+            if buffer_size is not None:
+                # Each row is one iteration that wrote buffer_size bytes
+                total_bytes = len(df) * buffer_size
+                # Convert to stress-ng equivalent bogo-ops (write64 uses 256 bytes per op)
+                bogo_ops = total_bytes // 256
+            else:
+                # For CPU workloads, use perf directly as bogo-ops
+                # (perf is calibrated loop count, similar conceptually to bogo-ops)
+                bogo_ops = int(total_perf)
+
+            # Calculate bogo-ops per second
+            bogo_ops_per_sec = bogo_ops / real_time if real_time > 0 else 0.0
+
+            return StressMetrics(
+                bogo_ops=bogo_ops,
+                bogo_ops_per_sec_cpu_time=bogo_ops_per_sec,
+                real_time=real_time
+            )
+        except Exception as e:
+            print(f"Error parsing rt-app log {log_file}: {e}")
+            return None
+
+    def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Parse and return metrics from rt-app log files.
+
+        rt-app logs contain:
+        - perf: calibrated loop iterations (for CPU work)
+        - iteration count: number of times workload ran (for memory work)
+
+        We convert these to equivalent stress-ng bogo-ops for comparability.
+        """
+        cpu_metrics = None
+        mem_metrics = None
+
+        # Parse CPU metrics from first CPU thread log
+        if self.cpu_stressors:
+            cpu_log = self.output_dir / "rt-app-cpu_0_0-0.log"
+            cpu_metrics = self._parse_rt_app_log(cpu_log)
+
+        # Parse memory metrics from first memory thread log
+        if self.mem_stressors:
+            mem_log = self.output_dir / "rt-app-mem_0_0-1.log"
+            # Get buffer size from first memory stressor
+            buffer_size = self._parse_memory_size(self.mem_stressors[0]['bytes_per_worker'])
+            mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=buffer_size)
 
         return cpu_metrics, mem_metrics
