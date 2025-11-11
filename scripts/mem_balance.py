@@ -799,6 +799,30 @@ class ExperimentRunner:
         # Create visualization
         self._create_plots(df, max_cpu_persec, max_mem_persec)
 
+        # Analyze timing skew for both workloads
+        both_workloads = df[df['workload'] == 'both'].copy()
+        if len(both_workloads) > 0 and 'real_time_cpu' in both_workloads.columns and 'real_time_mem' in both_workloads.columns:
+            print("\nTiming Skew Analysis (for 'both' workload experiments):")
+            print("=" * 60)
+
+            # Calculate skew as the ratio of differences
+            both_workloads['time_ratio'] = both_workloads['real_time_mem'] / both_workloads['real_time_cpu']
+            both_workloads['skew_percent'] = (both_workloads['time_ratio'] - 1.0) * 100
+
+            max_skew = both_workloads['skew_percent'].abs().max()
+            median_skew = both_workloads['skew_percent'].median()
+            mean_skew = both_workloads['skew_percent'].mean()
+
+            print(f"Max skew:     {max_skew:6.1f}% (memory workload time vs CPU workload time)")
+            print(f"Median skew:  {median_skew:6.1f}%")
+            print(f"Average skew: {mean_skew:6.1f}%")
+
+            # Show the worst offenders
+            worst_case = both_workloads.loc[both_workloads['skew_percent'].abs().idxmax()]
+            print(f"\nWorst case: {worst_case['scheduler']}/{worst_case['pinning']}")
+            print(f"  CPU time: {worst_case['real_time_cpu']:.2f}s, MEM time: {worst_case['real_time_mem']:.2f}s")
+            print(f"  Skew: {worst_case['skew_percent']:.1f}%")
+
         # Print summary table
         print("\nSummary Results:")
         summary_cols = ['scheduler', 'workload', 'pinning', 'cpu_normalized', 'mem_normalized', 'combined_tput']
