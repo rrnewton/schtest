@@ -392,7 +392,8 @@ class RTAppStressor(Stressor):
                 bytes_per_worker = '1g'
 
         # Call parent implementation
-        return super().add_mem_stressor(count, cpu_list, bytes_per_worker, **kwargs)
+        super().add_mem_stressor(count, cpu_list, bytes_per_worker, **kwargs)
+        return self
 
     def _parse_memory_size(self, size_str: str) -> int:
         """Parse memory size string (e.g., '1g', '512m') to bytes.

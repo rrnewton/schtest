@@ -5,7 +5,7 @@
 # VENV_DIR := $(shell pwd)/../.venv
 
 REPONAME=$(shell basename $(shell dirname `pwd`))
-VENV_DIR := "$(HOME)/venvs/$(REPONAME)_venv/"
+VENV_DIR := $(HOME)/venvs/$(REPONAME)_venv
 PYTHON := $(VENV_DIR)/bin/python
 REQUIREMENTS_IN := requirements.in
 REQUIREMENTS_LOCK := requirements.txt
@@ -39,16 +39,16 @@ install_deps: ## Install Python virtual environment and dependencies from lock f
 	@if [ ! -f "$(VENV_DIR)/bin/pip" ]; then \
 		echo "Creating virtual environment at $(VENV_DIR)..."; \
 		mkdir -p "$(VENV_DIR)"; \
-		python3 -m venv $(VENV_DIR); \
+		python3 -m venv "$(VENV_DIR)"; \
 	fi
 	@echo "Installing pip-tools..."
-	@$(VENV_DIR)/bin/pip install 'pip<25' pip-tools
+	@"$(VENV_DIR)/bin/pip" install 'pip<25' pip-tools
 	@if [ ! -f "$(REQUIREMENTS_LOCK)" ]; then \
 		echo "📋 Lock file not found, generating from $(REQUIREMENTS_IN)..."; \
 		$(MAKE) update_deps; \
 	fi
 	@echo "📦 Installing dependencies from lock file $(REQUIREMENTS_LOCK)..."
-	@$(VENV_DIR)/bin/pip-sync $(REQUIREMENTS_LOCK)
+	@"$(VENV_DIR)/bin/pip-sync" $(REQUIREMENTS_LOCK)
 	@echo "✅ Python environment ready at $(VENV_DIR)"
 
 .PHONY: update_deps
@@ -58,7 +58,7 @@ update_deps: ## Update dependencies and regenerate lock file
 		echo "❌ Virtual environment not found. Run 'make install_deps' first."; \
 		exit 1; \
 	fi
-	@$(VENV_DIR)/bin/pip-compile --upgrade --output-file $(REQUIREMENTS_LOCK) $(REQUIREMENTS_IN)
+	@"$(VENV_DIR)/bin/pip-compile" --upgrade --output-file $(REQUIREMENTS_LOCK) $(REQUIREMENTS_IN)
 	@echo "✅ Lock file updated: $(REQUIREMENTS_LOCK)"
 
 .PHONY: install_deps_dev
@@ -102,13 +102,13 @@ quick_test: check_deps ## Run a quick 2-second test
 .PHONY: unittest
 unittest: pytest_output
 	@echo "Running tests with coverage..."
-	cd pytest_output && ../$(PYTHON) -m pytest ../tests/ \
+	cd pytest_output && $(PYTHON) -m pytest ../tests/ \
 		--cov=parse_topo --cov-report=html --cov-report=term
 
 .PHONY: unittest-ci
 unittest-ci: pytest_output
 	@echo "🧪 Running all unit tests in CI mode..."
-	cd pytest_output && ../$(PYTHON) -m pytest ../tests/ \
+	cd pytest_output && $(PYTHON) -m pytest ../tests/ \
 		--junitxml=test-results.xml \
 		--cov=parse_topo \
 		--cov=mem_balance \
@@ -143,6 +143,7 @@ check_deps: ## Check if all dependencies are available
 	@echo "🔍 Checking dependencies..."
 	@which stress-ng > /dev/null || (echo "❌ stress-ng missing (install with: sudo dnf install stress-ng)"; exit 1)
 	@which perf > /dev/null || (echo "❌ perf missing (install with: sudo dnf install perf)"; exit 1)
+	@which lstopo > /dev/null || which hwloc-ls > /dev/null || (echo "❌ hwloc tools missing (install with: sudo dnf install hwloc)"; exit 1)
 	@if [ -f "$(REQUIREMENTS_LOCK)" ]; then \
 		echo "📦 Lock file found: $(REQUIREMENTS_LOCK)"; \
 	else \
