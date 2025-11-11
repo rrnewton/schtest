@@ -455,15 +455,8 @@ class ExperimentRunner:
         print(f"Running: {' '.join(perf_cmd)}")
 
         # Execute stressor (generates script) but wrap with perf for the actual execution
-        # Note: We need to create the script manually to wrap with perf
-        if isinstance(stressor_obj, StressNGStressor):
-            script_content = stressor_obj._create_script()
-        elif isinstance(stressor_obj, RTAppStressor):
-            # RTAppStressor doesn't have _create_script, it uses JSON config
-            # For now, we'll call execute directly which handles everything
-            raise NotImplementedError("RTAppStressor doesn't support perf wrapping yet")
-        else:
-            raise ValueError(f"Unknown stressor type: {type(stressor_obj)}")
+        # Both StressNGStressor and RTAppStressor now have _create_script()
+        script_content = stressor_obj._create_script()
         with open(stress_script, 'w') as f:
             f.write(script_content)
         os.chmod(stress_script, 0o755)

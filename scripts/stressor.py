@@ -83,6 +83,17 @@ class Stressor(ABC):
         return self
 
     @abstractmethod
+    def _create_script(self) -> str:
+        """Generate bash script for stress test execution.
+
+        This script will be wrapped with perf for performance monitoring.
+
+        Returns:
+            Bash script content as a string
+        """
+        pass
+
+    @abstractmethod
     def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
         """Execute the stress test and return (cpu_metrics, mem_metrics).
 
@@ -477,8 +488,11 @@ class RTAppStressor(Stressor):
 
         return config
 
-    def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
-        """Execute the stress test and return metrics."""
+    def _create_script(self) -> str:
+        """Generate bash script that calls rt-app with JSON config.
+
+        This allows rt-app to be wrapped with perf just like stress-ng.
+        """
         # Generate and write JSON config
         config = self._create_json_config()
         config_file = self.output_dir / "rt-app-config.json"
@@ -486,9 +500,26 @@ class RTAppStressor(Stressor):
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
 
-        # Execute rt-app
+        # Create bash script that calls rt-app
+        script_content = f"""#!/bin/bash
+set -xeuo pipefail
+{self.rt_app_path} {config_file}
+"""
+        return script_content
+
+    def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Execute the stress test and return metrics."""
+        # Generate script and write it
+        script_content = self._create_script()
+        script_file = self.output_dir / "stress.sh"
+
+        with open(script_file, 'w') as f:
+            f.write(script_content)
+        os.chmod(script_file, 0o755)
+
+        # Execute script
         result = subprocess.run(
-            [self.rt_app_path, str(config_file)],
+            [str(script_file)],
             capture_output=True,
             text=True
         )
