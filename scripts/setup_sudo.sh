@@ -61,18 +61,50 @@ fi
 chmod 0440 "$SUDOERS_FILE"
 
 # Validate the sudoers file
-if visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
-    echo "✅ Sudoers configuration created successfully: $SUDOERS_FILE"
-    echo ""
-    echo "The following commands can now run without password:"
-    echo "  - sudo dmesg"
-    if [ -n "$SCX_LAVD_PATH" ]; then
-        echo "  - sudo $SCX_LAVD_PATH"
-    fi
-    echo ""
-    echo "You can now run: ./mem_balance.py"
-else
+if ! visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
     echo "❌ Error: Invalid sudoers configuration"
     rm -f "$SUDOERS_FILE"
     exit 1
 fi
+
+# Check if main sudoers includes sudoers.d directory
+if ! grep -q "^[^#]*@includedir[[:space:]]\+$SUDOERS_DIR" /etc/sudoers && \
+   ! grep -q "^[^#]*#includedir[[:space:]]\+$SUDOERS_DIR" /etc/sudoers; then
+    echo ""
+    echo "⚠️  Warning: /etc/sudoers does not include $SUDOERS_DIR"
+    echo "Adding include directive to /etc/sudoers..."
+    echo "" >> /etc/sudoers
+    echo "## Include sudoers.d directory (added by schtest setup_sudo.sh)" >> /etc/sudoers
+    echo "@includedir $SUDOERS_DIR" >> /etc/sudoers
+
+    # Validate after modification
+    if ! visudo -c >/dev/null 2>&1; then
+        echo "❌ Error: Failed to add include directive to /etc/sudoers"
+        # Try to remove what we added
+        sed -i '/## Include sudoers.d directory (added by schtest setup_sudo.sh)/,+1d' /etc/sudoers
+        exit 1
+    fi
+fi
+
+echo "✅ Sudoers configuration created successfully: $SUDOERS_FILE"
+echo ""
+
+# Test if passwordless sudo actually works
+echo "Testing passwordless sudo for user $USERNAME..."
+if su - "$USERNAME" -c "sudo -n dmesg -T | tail -1" >/dev/null 2>&1; then
+    echo "✅ Passwordless sudo is working!"
+else
+    echo "⚠️  Warning: Passwordless sudo test failed"
+    echo "This might be a caching issue. Try logging out and back in."
+    echo ""
+    echo "Or test manually with: sudo -k && sudo -n dmesg"
+fi
+
+echo ""
+echo "The following commands can now run without password:"
+echo "  - sudo dmesg"
+if [ -n "$SCX_LAVD_PATH" ]; then
+    echo "  - sudo $SCX_LAVD_PATH"
+fi
+echo ""
+echo "You can now run: ./mem_balance.py"
