@@ -5,6 +5,7 @@ Runs stress-ng workloads with different thread pinning strategies
 and analyzes performance metrics.
 """
 
+import atexit
 import functools
 import os
 import subprocess
@@ -26,6 +27,77 @@ from parse_topo import parse_topology, Machine
 from sched_monitor import SchedMonitor, SchedulerType
 # Import stressor classes
 from stressor import Stressor, StressNGStressor, StressMetrics
+
+
+# Ownership preservation for running as root
+def _get_target_ownership(path: Path) -> Tuple[int, int]:
+    """Get the target uid/gid for files in the given path.
+
+    If running as root, we want to preserve the ownership of the parent directory
+    to avoid polluting user-owned directories with root-owned files.
+
+    Args:
+        path: Path to check (or its parent if it doesn't exist)
+
+    Returns:
+        Tuple of (uid, gid) for the target ownership
+    """
+    if os.geteuid() != 0:
+        # Not running as root, no need to change ownership
+        return (-1, -1)
+
+    # Find the first existing parent directory
+    check_path = path
+    while not check_path.exists() and check_path != check_path.parent:
+        check_path = check_path.parent
+
+    if check_path.exists():
+        stat_info = check_path.stat()
+        return (stat_info.st_uid, stat_info.st_gid)
+    else:
+        # Fallback: use the user who invoked sudo, if available
+        sudo_uid = os.environ.get('SUDO_UID')
+        sudo_gid = os.environ.get('SUDO_GID')
+        if sudo_uid and sudo_gid:
+            return (int(sudo_uid), int(sudo_gid))
+
+    return (-1, -1)
+
+
+def _fix_ownership_recursive(path: Path, uid: int, gid: int) -> None:
+    """Recursively fix ownership of a directory and all its contents.
+
+    Args:
+        path: Path to fix
+        uid: Target user ID
+        gid: Target group ID
+    """
+    if uid < 0 or gid < 0:
+        # No ownership change needed
+        return
+
+    if not path.exists():
+        return
+
+    try:
+        print(f"\nRestoring ownership of {path} to uid={uid}, gid={gid}...")
+
+        # Fix the path itself
+        os.chown(path, uid, gid)
+
+        # If it's a directory, recursively fix contents
+        if path.is_dir():
+            for item in path.rglob('*'):
+                try:
+                    os.chown(item, uid, gid)
+                except (OSError, PermissionError) as e:
+                    print(f"Warning: Could not fix ownership of {item}: {e}")
+
+        print("Ownership restored successfully")
+
+    except (OSError, PermissionError) as e:
+        print(f"Warning: Could not fix ownership of {path}: {e}")
+
 
 # Configuration
 EXPERIMENT_DURATION = 6  # seconds
@@ -866,6 +938,14 @@ def main() -> None:
     print(f"Machine: {runner.machine_name}")
     print(f"Detected {runner.num_cores} physical cores")
     print(f"Results directory: {runner.results_dir}")
+
+    # Set up ownership preservation if running as root
+    if os.geteuid() == 0:
+        target_uid, target_gid = _get_target_ownership(RESULTS_DIR)
+        if target_uid >= 0 and target_gid >= 0:
+            print(f"Running as root: will restore ownership to uid={target_uid}, gid={target_gid}")
+            # Register exit handler to fix ownership on exit (success or error)
+            atexit.register(lambda: _fix_ownership_recursive(RESULTS_DIR, target_uid, target_gid))
 
     # Check dependencies
     try:
