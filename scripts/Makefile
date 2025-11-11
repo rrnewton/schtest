@@ -2,7 +2,10 @@
 # ===================================
 
 # Configuration
-VENV_DIR := ../.venv
+# VENV_DIR := $(shell pwd)/../.venv
+
+REPONAME=$(shell basename $(shell dirname `pwd`))
+VENV_DIR := "$(HOME)/venvs/$(REPONAME)_venv/"
 PYTHON := $(VENV_DIR)/bin/python
 REQUIREMENTS_IN := requirements.in
 REQUIREMENTS_LOCK := requirements.txt
@@ -32,13 +35,14 @@ help: ## Show this help message
 
 .PHONY: install_deps
 install_deps: ## Install Python virtual environment and dependencies from lock file
-	@echo "📦 Setting up Python environment..."
-	@if [ ! -d "$(VENV_DIR)" ]; then \
+	@echo "📦 Setting up Python environment... current dir "`pwd`
+	@if [ ! -f "$(VENV_DIR)/bin/pip" ]; then \
 		echo "Creating virtual environment at $(VENV_DIR)..."; \
+		mkdir -p "$(VENV_DIR)"; \
 		python3 -m venv $(VENV_DIR); \
 	fi
 	@echo "Installing pip-tools..."
-	@$(VENV_DIR)/bin/pip install --upgrade pip pip-tools
+	@$(VENV_DIR)/bin/pip install 'pip<25' pip-tools
 	@if [ ! -f "$(REQUIREMENTS_LOCK)" ]; then \
 		echo "📋 Lock file not found, generating from $(REQUIREMENTS_IN)..."; \
 		$(MAKE) update_deps; \
