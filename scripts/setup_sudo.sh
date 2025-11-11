@@ -47,6 +47,9 @@ cat > "$SUDOERS_FILE" << EOF
 # Allow dmesg for monitoring scheduler messages
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/dmesg
 
+# Allow process management for scheduler control
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/pkill, /usr/bin/killall
+
 # Allow basic commands for testing sudo setup
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/ls, /usr/bin/pwd
 EOF
