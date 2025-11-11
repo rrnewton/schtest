@@ -4,12 +4,30 @@ Scheduler Monitor Library
 Manages starting, stopping, and monitoring scheduler processes.
 """
 
+import os
 import subprocess
 import time
 import select
 from pathlib import Path
 from typing import Optional, List
 from enum import Enum
+
+
+def _maybe_sudo(cmd: List[str]) -> List[str]:
+    """Prepend sudo to command only if not running as root.
+
+    Args:
+        cmd: Command to potentially wrap with sudo
+
+    Returns:
+        Command with sudo prepended if needed
+    """
+    if os.geteuid() == 0:
+        # Already running as root, no need for sudo
+        return cmd
+    else:
+        # Not root, need sudo
+        return ["sudo"] + cmd
 
 
 class SchedulerType(Enum):
@@ -35,7 +53,7 @@ class DmesgMonitor:
         # Using start_new_session=True makes the process a session leader
         # so we can kill the entire process tree
         self.dmesg_proc = subprocess.Popen(
-            ["sudo", "dmesg", "-W"],
+            _maybe_sudo(["dmesg", "-W"]),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -76,7 +94,8 @@ class DmesgMonitor:
                     # Check for common issues
                     if "no new privileges" in stderr_output.lower():
                         error_msg += "\n\nThis is likely due to running in a sandboxed environment."
-                        error_msg += "\nTry running without sandbox restrictions or use 'dmesg' without sudo."
+                        error_msg += "\nSolution: Run the entire script with sudo instead:"
+                        error_msg += "\n  sudo ./mem_balance.py"
 
                 raise RuntimeError(error_msg)
 
@@ -161,7 +180,7 @@ class DmesgMonitor:
             import os
             import signal
 
-            # Kill the entire process group (sudo + dmesg)
+            # Kill the entire process group (may include sudo wrapper if not running as root)
             try:
                 if self.dmesg_proc.poll() is None:  # Process still running
                     os.killpg(os.getpgid(self.dmesg_proc.pid), signal.SIGTERM)
@@ -230,11 +249,11 @@ class SchedMonitor:
         self.dmesg_monitor = DmesgMonitor(scheduler_name)
 
         try:
-            # Start the scheduler process with sudo
+            # Start the scheduler process (with sudo if not running as root)
             # Using start_new_session=True makes the process a session leader
-            # so we can kill the entire process tree (sudo + actual scheduler)
+            # so we can kill the entire process tree if sudo is used
             self.scheduler_proc = subprocess.Popen(
-                ["sudo", str(self.scheduler_path)],
+                _maybe_sudo([str(self.scheduler_path)]),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -382,8 +401,8 @@ class SchedMonitor:
         Sends SIGINT first (like Ctrl-C) to the process group to allow the scheduler
         to cleanly unload itself from the kernel, then falls back to SIGTERM and SIGKILL.
 
-        Since we start processes with sudo, we need to kill the entire process group
-        (sudo + the actual scheduler) not just the sudo wrapper.
+        We kill the entire process group to ensure child processes are stopped
+        (e.g., if sudo wrapper is used when not running as root).
         """
         import signal
         import os
