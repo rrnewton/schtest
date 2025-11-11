@@ -8,6 +8,7 @@ import os
 import subprocess
 import yaml
 import json
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Tuple
 from abc import ABC, abstractmethod
@@ -234,19 +235,62 @@ class StressNGStressor(Stressor):
         return cpu_metrics, mem_metrics
 
 
+def find_rt_app() -> str:
+    """Find rt-app binary, checking PATH and relative paths.
+
+    Returns:
+        Path to rt-app executable
+
+    Raises:
+        FileNotFoundError: If rt-app cannot be found
+    """
+    # First check if rt-app is on PATH
+    rt_app_path = shutil.which('rt-app')
+    if rt_app_path:
+        return rt_app_path
+
+    # Find git repo root to check for ../rt-app
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        repo_root = Path(result.stdout.strip())
+
+        # Check for ../rt-app/src/rt-app relative to repo root
+        relative_rt_app = repo_root.parent / 'rt-app' / 'src' / 'rt-app'
+        if relative_rt_app.exists() and relative_rt_app.is_file():
+            return str(relative_rt_app)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Not in a git repo or git not available, continue to error
+        pass
+
+    # Could not find rt-app
+    raise FileNotFoundError(
+        "rt-app not found. Please either:\n"
+        "  1. Install rt-app and ensure it's on PATH, or\n"
+        "  2. Build rt-app in ../rt-app/ relative to the repo root"
+    )
+
+
 class RTAppStressor(Stressor):
     """rt-app based stressor implementation."""
 
-    def __init__(self, duration: int, output_dir: Path, rt_app_path: str = "/home/newton/work/rrn_scx_playground/rt-app/src/rt-app"):
+    def __init__(self, duration: int, output_dir: Path, rt_app_path: Optional[str] = None):
         """Initialize rt-app stressor.
 
         Args:
             duration: Test duration in seconds
             output_dir: Directory where JSON config and output files will be written
-            rt_app_path: Path to rt-app executable
+            rt_app_path: Path to rt-app executable (auto-detected if None)
+
+        Raises:
+            FileNotFoundError: If rt-app cannot be found
         """
         super().__init__(duration, output_dir)
-        self.rt_app_path = rt_app_path
+        self.rt_app_path = rt_app_path or find_rt_app()
 
     def _parse_memory_size(self, size_str: str) -> int:
         """Parse memory size string (e.g., '1g', '512m') to bytes.
