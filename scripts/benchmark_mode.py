@@ -3,18 +3,26 @@
 Benchmark Mode Script
 
 This script locks down the system for consistent benchmarking by:
-1. Locking CPU frequency scaling at a low frequency to prevent thermal throttling
-2. (TODO) Sequestering other processes to CPU0 for isolated benchmarking on CPU1..N
+1. Disabling CPU turbo/boost (Intel Turbo Boost, AMD Precision Boost)
+2. Locking CPU frequency scaling at the lowest P-state frequency to prevent thermal throttling
+3. (TODO) Sequestering other processes to CPU0 for isolated benchmarking on CPU1..N
 
 Usage:
     sudo ./benchmark_mode.py
 
 The script will:
 - Acquire a lockfile in /tmp to prevent multiple instances
-- Configure the system for benchmarking
+- Configure the system for benchmarking (disable boost, lock frequencies)
 - Print "READY_FOR_BENCHMARKING" when setup is complete
 - Run until killed (SIGINT/SIGTERM)
-- Clean up all changes on exit
+- Clean up all changes on exit (restore to unrestricted state)
+
+Note on CPU frequencies:
+- Modern CPUs have nominal P-state frequencies (e.g., 1.0-1.2 GHz) that appear in
+  /sys/devices/system/cpu/cpuN/cpufreq/scaling_available_frequencies
+- Turbo/Boost allows CPUs to run beyond the highest P-state (e.g., up to 2.9+ GHz)
+- This script disables turbo/boost and locks to the lowest P-state for consistency
+- On restore, CPUs are returned to unrestricted state (full frequency range + boost enabled)
 """
 
 import os
@@ -38,8 +46,8 @@ class CPUState:
     """Stores original CPU state for restoration."""
     cpu_id: int
     governor: str
-    min_freq: str
-    max_freq: str
+    # Note: We don't store the exact min/max frequencies
+    # Instead, we'll restore to hardware limits (cpuinfo_min_freq, cpuinfo_max_freq)
 
 
 class BenchmarkMode:
@@ -48,6 +56,7 @@ class BenchmarkMode:
     def __init__(self):
         self.lockfile: Optional[int] = None
         self.original_states: List[CPUState] = []
+        self.original_boost: Optional[str] = None
         self.cleanup_done = False
 
     def _acquire_lockfile(self) -> None:
@@ -113,24 +122,37 @@ class BenchmarkMode:
             raise RuntimeError(f"Failed to write '{value}' to {path}: {e}")
 
     def _save_cpu_state(self, cpu_id: int) -> CPUState:
-        """Save current state of a CPU."""
+        """Save current state of a CPU (just the governor)."""
         return CPUState(
             cpu_id=cpu_id,
             governor=self._read_cpu_file(cpu_id, "scaling_governor"),
-            min_freq=self._read_cpu_file(cpu_id, "scaling_min_freq"),
-            max_freq=self._read_cpu_file(cpu_id, "scaling_max_freq"),
         )
 
     def _restore_cpu_state(self, state: CPUState) -> None:
-        """Restore a CPU to its original state."""
+        """Restore a CPU to unrestricted state (hardware limits)."""
         try:
-            # Restore governor first
-            self._write_cpu_file(state.cpu_id, "scaling_governor", state.governor)
-            # Then restore frequency limits
-            self._write_cpu_file(state.cpu_id, "scaling_min_freq", state.min_freq)
-            self._write_cpu_file(state.cpu_id, "scaling_max_freq", state.max_freq)
-            print(f"Restored CPU{state.cpu_id}: governor={state.governor}, "
-                  f"min={state.min_freq}, max={state.max_freq}")
+            # Read hardware limits
+            cpuinfo_min = self._read_cpu_file(state.cpu_id, "cpuinfo_min_freq")
+            cpuinfo_max = self._read_cpu_file(state.cpu_id, "cpuinfo_max_freq")
+
+            # Restore governor first (try original, fallback to schedutil/performance)
+            try:
+                self._write_cpu_file(state.cpu_id, "scaling_governor", state.governor)
+                governor = state.governor
+            except:
+                try:
+                    self._write_cpu_file(state.cpu_id, "scaling_governor", "schedutil")
+                    governor = "schedutil"
+                except:
+                    self._write_cpu_file(state.cpu_id, "scaling_governor", "performance")
+                    governor = "performance"
+
+            # Set frequency limits to hardware limits (unrestricted)
+            self._write_cpu_file(state.cpu_id, "scaling_min_freq", cpuinfo_min)
+            self._write_cpu_file(state.cpu_id, "scaling_max_freq", cpuinfo_max)
+
+            print(f"Restored CPU{state.cpu_id}: governor={governor}, "
+                  f"freq=[{cpuinfo_min}, {cpuinfo_max}] (unrestricted)")
         except Exception as e:
             print(f"Warning: Failed to restore CPU{state.cpu_id}: {e}", file=sys.stderr)
 
@@ -151,9 +173,71 @@ class BenchmarkMode:
         except Exception as e:
             raise RuntimeError(f"Could not determine lowest frequency for CPU{cpu_id}: {e}")
 
+    def _save_boost_state(self) -> Optional[str]:
+        """Save current CPU boost state (Intel/AMD)."""
+        boost_path = Path("/sys/devices/system/cpu/cpufreq/boost")
+        intel_path = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
+
+        try:
+            if boost_path.exists():
+                return boost_path.read_text().strip()
+            elif intel_path.exists():
+                return intel_path.read_text().strip()
+        except Exception as e:
+            print(f"Warning: Could not read boost state: {e}", file=sys.stderr)
+
+        return None
+
+    def _disable_boost(self) -> None:
+        """Disable CPU turbo/boost (Intel/AMD)."""
+        boost_path = Path("/sys/devices/system/cpu/cpufreq/boost")
+        intel_path = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
+
+        try:
+            if boost_path.exists():
+                boost_path.write_text("0\n")
+                print("Disabled CPU boost (AMD/generic)")
+            elif intel_path.exists():
+                intel_path.write_text("1\n")  # Note: Intel uses inverted logic (1 = no turbo)
+                print("Disabled CPU turbo (Intel)")
+            else:
+                print("Note: No boost/turbo control found (not available or already disabled)")
+        except Exception as e:
+            print(f"Warning: Could not disable boost: {e}", file=sys.stderr)
+
+    def _restore_boost_state(self) -> None:
+        """Restore CPU boost state to original value."""
+        if self.original_boost is None:
+            return
+
+        boost_path = Path("/sys/devices/system/cpu/cpufreq/boost")
+        intel_path = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
+
+        try:
+            if boost_path.exists():
+                boost_path.write_text(self.original_boost + "\n")
+                print(f"Restored CPU boost: {self.original_boost}")
+            elif intel_path.exists():
+                intel_path.write_text(self.original_boost + "\n")
+                print(f"Restored Intel turbo: {self.original_boost}")
+        except Exception as e:
+            print(f"Warning: Could not restore boost state: {e}", file=sys.stderr)
+
     def _lock_cpu_frequency(self) -> None:
-        """Lock all CPUs to lowest frequency to prevent thermal throttling."""
+        """Lock all CPUs to lowest frequency to prevent thermal throttling.
+
+        Note: This locks CPUs to their lowest P-state frequency. On systems with
+        turbo/boost (Intel Turbo Boost, AMD Precision Boost), the actual running
+        frequency can still exceed this if boost is enabled. We disable boost
+        separately to ensure frequencies stay at the locked value.
+        """
         print("\nLocking CPU frequencies...")
+
+        # Save and disable boost/turbo first
+        self.original_boost = self._save_boost_state()
+        if self.original_boost:
+            print(f"Original boost state: {self.original_boost}")
+        self._disable_boost()
 
         cpus = self._get_cpu_numbers()
         if not cpus:
@@ -166,11 +250,13 @@ class BenchmarkMode:
             original = self._save_cpu_state(cpu_id)
             self.original_states.append(original)
 
-            # Get lowest frequency
+            # Get current frequency range and lowest frequency
+            current_min = self._read_cpu_file(cpu_id, "scaling_min_freq")
+            current_max = self._read_cpu_file(cpu_id, "scaling_max_freq")
             lowest_freq = self._get_lowest_frequency(cpu_id)
 
             print(f"CPU{cpu_id}: current governor={original.governor}, "
-                  f"freq range=[{original.min_freq}, {original.max_freq}]")
+                  f"freq range=[{current_min}, {current_max}]")
             print(f"CPU{cpu_id}: locking to {lowest_freq} kHz")
 
             # Set governor to userspace (allows manual frequency setting)
@@ -207,11 +293,16 @@ class BenchmarkMode:
             print(f"  Verified: governor={current_gov}, freq=[{current_min}, {current_max}]")
 
     def _restore_all_cpus(self) -> None:
-        """Restore all CPUs to their original state."""
+        """Restore all CPUs to unrestricted state."""
         if not self.original_states:
             return
 
         print("\nRestoring CPU frequencies...")
+
+        # Restore boost/turbo first
+        self._restore_boost_state()
+
+        # Restore all CPUs to unrestricted state
         for state in self.original_states:
             self._restore_cpu_state(state)
 
