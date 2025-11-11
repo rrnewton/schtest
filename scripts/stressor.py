@@ -54,12 +54,19 @@ class Stressor(ABC):
         })
         return self
 
-    def add_mem_stressor(self, count: int, cpu_list: Optional[List[int]] = None, **kwargs: Any) -> 'Stressor':
+    def add_mem_stressor(
+        self,
+        count: int,
+        cpu_list: Optional[List[int]] = None,
+        bytes_per_worker: str = '1g',
+        **kwargs: Any
+    ) -> 'Stressor':
         """Add a memory stress test.
 
         Args:
             count: Number of memory stressor instances
             cpu_list: List of CPU numbers to pin to, or None for no pinning
+            bytes_per_worker: Memory size per worker (e.g., '1g', '512m')
             **kwargs: Additional stressor-specific parameters
 
         Returns:
@@ -68,6 +75,7 @@ class Stressor(ABC):
         self.mem_stressors.append({
             'count': count,
             'cpu_list': cpu_list,
+            'bytes_per_worker': bytes_per_worker,
             'kwargs': kwargs
         })
         return self
@@ -122,10 +130,9 @@ class StressNGStressor(Stressor):
         method = kwargs.get('method', 'int64')
         return f"--cpu {count} --cpu-method {method}"
 
-    def _get_mem_params(self, count: int, **kwargs: Any) -> str:
+    def _get_mem_params(self, count: int, bytes_per_worker: str, **kwargs: Any) -> str:
         """Get stress-ng memory workload parameters."""
         method = kwargs.get('method', 'ror')
-        bytes_per_worker = kwargs.get('bytes_per_worker', f'{count}g')
         keep = '--vm-keep' if kwargs.get('keep', True) else ''
         return f"--vm {count} {keep} --vm-method {method} --vm-bytes {bytes_per_worker}"
 
@@ -154,7 +161,11 @@ class StressNGStressor(Stressor):
         for i, mem_stress in enumerate(self.mem_stressors):
             output_file = self.output_dir / f"metrics_mem_{i}.yaml"
             taskset = self._format_cpu_list(mem_stress['cpu_list'])
-            params = self._get_mem_params(mem_stress['count'], **mem_stress['kwargs'])
+            params = self._get_mem_params(
+                mem_stress['count'],
+                mem_stress['bytes_per_worker'],
+                **mem_stress['kwargs']
+            )
 
             cmd = f"stress-ng --metrics -t {self.duration} --yaml {output_file} {params} {taskset}"
             script_lines.append(f"{cmd};")

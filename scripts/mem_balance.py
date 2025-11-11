@@ -287,7 +287,7 @@ class ExperimentRunner:
             stressor.add_cpu_stressor(P, cpu_list, method='int64')
 
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            stressor.add_mem_stressor(P, mem_list, method='ror', bytes_per_worker=f'{P}g', keep=True)
+            stressor.add_mem_stressor(P, mem_list, f'{P}g', method='ror', keep=True)
 
         return stressor
 
