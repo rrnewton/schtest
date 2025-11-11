@@ -235,6 +235,73 @@ class StressNGStressor(Stressor):
         return cpu_metrics, mem_metrics
 
 
+def get_l3_fairshare(cpu: int = 0, percentage: float = 0.95) -> int:
+    """Calculate L3 cache fairshare per core.
+
+    Args:
+        cpu: CPU number to check for L3 cache info (default: 0)
+        percentage: Percentage of fairshare to return (default: 0.95 = 95%)
+
+    Returns:
+        Number of bytes representing the percentage of L3 fairshare per core
+
+    Raises:
+        FileNotFoundError: If L3 cache information cannot be found
+        ValueError: If L3 cache information is invalid
+    """
+    # Find L3 cache index in /sys
+    cache_base = Path(f"/sys/devices/system/cpu/cpu{cpu}/cache")
+    if not cache_base.exists():
+        raise FileNotFoundError(f"Cache information not found for CPU {cpu}")
+
+    l3_index = None
+    for index_dir in cache_base.iterdir():
+        if index_dir.is_dir() and index_dir.name.startswith("index"):
+            level_file = index_dir / "level"
+            if level_file.exists():
+                with open(level_file) as f:
+                    if f.read().strip() == "3":
+                        l3_index = index_dir
+                        break
+
+    if not l3_index:
+        raise FileNotFoundError(f"L3 cache not found for CPU {cpu}")
+
+    # Read L3 cache size
+    size_file = l3_index / "size"
+    with open(size_file) as f:
+        size_str = f.read().strip()
+        # Parse size like "32768K" or "128M"
+        if size_str.endswith('K'):
+            l3_size = int(size_str[:-1]) * 1024
+        elif size_str.endswith('M'):
+            l3_size = int(size_str[:-1]) * 1024 * 1024
+        elif size_str.endswith('G'):
+            l3_size = int(size_str[:-1]) * 1024 * 1024 * 1024
+        else:
+            l3_size = int(size_str)
+
+    # Read shared CPU list to count cores sharing this L3
+    shared_cpus_file = l3_index / "shared_cpu_list"
+    with open(shared_cpus_file) as f:
+        shared_cpus_str = f.read().strip()
+        # Parse ranges like "0-7,32-39"
+        cpu_count = 0
+        for part in shared_cpus_str.split(','):
+            if '-' in part:
+                start, end = map(int, part.split('-'))
+                cpu_count += (end - start + 1)
+            else:
+                cpu_count += 1
+
+    if cpu_count == 0:
+        raise ValueError(f"Invalid shared CPU count for L3 cache: {shared_cpus_str}")
+
+    # Calculate fairshare per core
+    fairshare_per_core = l3_size / cpu_count
+    return int(fairshare_per_core * percentage)
+
+
 def find_rt_app() -> str:
     """Find rt-app binary, checking PATH and relative paths.
 
@@ -291,6 +358,41 @@ class RTAppStressor(Stressor):
         """
         super().__init__(duration, output_dir)
         self.rt_app_path = rt_app_path or find_rt_app()
+
+    def add_mem_stressor(
+        self,
+        count: int,
+        cpu_list: Optional[List[int]] = None,
+        bytes_per_worker: Optional[str] = None,
+        **kwargs: Any
+    ) -> 'RTAppStressor':
+        """Add a memory stress test with L3-aware default sizing.
+
+        Args:
+            count: Number of memory stressor instances
+            cpu_list: List of CPU numbers to pin to, or None for no pinning
+            bytes_per_worker: Memory size per worker (e.g., '1g', '512m').
+                            If None, defaults to 95% of L3 fairshare per core.
+            **kwargs: Additional stressor-specific parameters
+
+        Returns:
+            Self for method chaining
+        """
+        # Default to 95% of L3 fairshare if not specified
+        if bytes_per_worker is None:
+            # Determine which CPU to check based on cpu_list
+            check_cpu = cpu_list[0] if cpu_list else 0
+            try:
+                fairshare_bytes = get_l3_fairshare(cpu=check_cpu, percentage=0.95)
+                # Convert to string format (e.g., "1992294" -> "1992294")
+                bytes_per_worker = str(fairshare_bytes)
+            except (FileNotFoundError, ValueError) as e:
+                # Fall back to 1g if L3 detection fails
+                print(f"Warning: Could not detect L3 cache, using default 1g: {e}")
+                bytes_per_worker = '1g'
+
+        # Call parent implementation
+        return super().add_mem_stressor(count, cpu_list, bytes_per_worker, **kwargs)
 
     def _parse_memory_size(self, size_str: str) -> int:
         """Parse memory size string (e.g., '1g', '512m') to bytes.
