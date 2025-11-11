@@ -65,7 +65,20 @@ class DmesgMonitor:
 
         while time.time() - start_time < timeout:
             if self.dmesg_proc and self.dmesg_proc.poll() is not None:
-                raise RuntimeError("dmesg monitoring process died")
+                # Process died - capture stderr for diagnostics
+                stderr_output = ""
+                if self.dmesg_proc.stderr:
+                    stderr_output = self.dmesg_proc.stderr.read().strip()
+
+                error_msg = f"dmesg monitoring process died (exit code: {self.dmesg_proc.returncode})"
+                if stderr_output:
+                    error_msg += f"\nStderr: {stderr_output}"
+                    # Check for common issues
+                    if "no new privileges" in stderr_output.lower():
+                        error_msg += "\n\nThis is likely due to running in a sandboxed environment."
+                        error_msg += "\nTry running without sandbox restrictions or use 'dmesg' without sudo."
+
+                raise RuntimeError(error_msg)
 
             # Read with timeout to avoid blocking forever
             if self.dmesg_proc and self.dmesg_proc.stdout:
