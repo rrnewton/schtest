@@ -246,7 +246,8 @@ class ExperimentRunner:
         schedulers: Optional[List[SchedulerType]] = None,
         stressor: StressorType = StressorType.RT_APP,
         append_mode: bool = False,
-        trials: int = 1
+        trials: int = 1,
+        duration: int = EXPERIMENT_DURATION
     ) -> None:
         self.num_cores = self._get_num_cores()
         self.machine_name = machine_name or self._get_machine_name_from_cpuinfo()
@@ -258,6 +259,7 @@ class ExperimentRunner:
         self.stressor = stressor
         self.append_mode = append_mode
         self.trials = trials
+        self.duration = duration
 
         # Parse CPU topology
         print("Parsing CPU topology...")
@@ -380,9 +382,9 @@ class ExperimentRunner:
 
         # Create stressor with output directory based on type
         if stressor_type == StressorType.STRESS_NG:
-            stressor: Stressor = StressNGStressor(EXPERIMENT_DURATION, run_dir)
+            stressor: Stressor = StressNGStressor(self.duration, run_dir)
         elif stressor_type == StressorType.RT_APP:
-            stressor = RTAppStressor(EXPERIMENT_DURATION, run_dir)
+            stressor = RTAppStressor(self.duration, run_dir)
         else:
             raise ValueError(f"Unknown stressor type: {stressor_type}")
 
@@ -418,7 +420,7 @@ class ExperimentRunner:
             pinning=pinning,
             stressor=stressor,
             num_cores=self.num_cores,
-            experiment_duration=EXPERIMENT_DURATION,
+            experiment_duration=self.duration,
             machine=self.machine_name,
             kernel=self._get_kernel_version()
         )
@@ -1003,6 +1005,8 @@ def main() -> None:
                        help="Append mode: re-run experiments even if they already exist")
     parser.add_argument("--trials", type=int, default=1,
                        help="Number of trials to run for each configuration (default: 1)")
+    parser.add_argument("--seconds", type=int, default=6,
+                       help="Duration of each experiment in seconds (default: 6)")
     args = parser.parse_args()
 
     # Parse comma-separated lists into enum types
@@ -1034,6 +1038,7 @@ def main() -> None:
     print(f"  Workloads: {[w.value for w in workloads]}")
     print(f"  Pinning: {[p.value for p in pinning_strategies]}")
     print(f"  Schedulers: {[s.value for s in schedulers]}")
+    print(f"  Duration: {args.seconds} seconds")
     print(f"  Trials: {args.trials}")
     print(f"  Append mode: {args.append}")
     print("=" * 40)
@@ -1045,7 +1050,8 @@ def main() -> None:
         schedulers=schedulers,
         stressor=stressor,
         append_mode=args.append,
-        trials=args.trials
+        trials=args.trials,
+        duration=args.seconds
     )
     print(f"Machine: {runner.machine_name}")
     print(f"Detected {runner.num_cores} physical cores")
