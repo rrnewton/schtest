@@ -8,11 +8,15 @@ This script locks down the system for consistent benchmarking by:
 3. (TODO) Sequestering other processes to CPU0 for isolated benchmarking on CPU1..N
 
 Usage:
-    sudo ./benchmark_mode.py
+    sudo ./benchmark_mode.py [--freq-cap | --no-freq-cap]
+
+Options:
+    --freq-cap      Enable frequency capping (default)
+    --no-freq-cap   Disable frequency capping (noop mode)
 
 The script will:
 - Acquire a lockfile in /tmp to prevent multiple instances
-- Configure the system for benchmarking (disable boost, lock frequencies)
+- Configure the system for benchmarking (disable boost, lock frequencies) if --freq-cap
 - Print "READY_FOR_BENCHMARKING" when setup is complete
 - Run until killed (SIGINT/SIGTERM)
 - Clean up all changes on exit (restore to unrestricted state)
@@ -31,6 +35,7 @@ import signal
 import time
 import fcntl
 import atexit
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -53,7 +58,8 @@ class CPUState:
 class BenchmarkMode:
     """Manages system configuration for benchmarking."""
 
-    def __init__(self):
+    def __init__(self, freq_cap: bool = True):
+        self.freq_cap = freq_cap
         self.lockfile: Optional[int] = None
         self.original_states: List[CPUState] = []
         self.original_boost: Optional[str] = None
@@ -337,8 +343,12 @@ class BenchmarkMode:
         # Acquire lockfile
         self._acquire_lockfile()
 
-        # Lock CPU frequencies
-        self._lock_cpu_frequency()
+        # Lock CPU frequencies (if enabled)
+        if self.freq_cap:
+            self._lock_cpu_frequency()
+        else:
+            print("\nFrequency capping disabled (--no-freq-cap)")
+            print("System will run at normal frequencies with boost enabled")
 
         # TODO: Sequester processes to CPU0
         # This will be implemented in a future version
@@ -346,7 +356,8 @@ class BenchmarkMode:
         print("\n" + "="*60)
         print("READY_FOR_BENCHMARKING")
         print("="*60)
-        print("\nBenchmark mode is active. Press Ctrl+C to exit and restore system.")
+        mode_status = "with frequency capping" if self.freq_cap else "without frequency capping (noop)"
+        print(f"\nBenchmark mode is active {mode_status}. Press Ctrl+C to exit.")
         sys.stdout.flush()
 
     def run(self) -> None:
@@ -365,9 +376,32 @@ def signal_handler(signum: int, frame) -> None:
     sys.exit(0)
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Benchmark mode script for system configuration control",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--freq-cap",
+        dest="freq_cap",
+        action="store_true",
+        help="Enable CPU frequency capping (default)",
+    )
+    parser.add_argument(
+        "--no-freq-cap",
+        dest="freq_cap",
+        action="store_false",
+        help="Disable CPU frequency capping (noop mode)",
+    )
+    parser.set_defaults(freq_cap=True)  # Default is frequency capping enabled
+    return parser.parse_args()
+
+
 def main() -> None:
     """Main entry point."""
-    benchmark = BenchmarkMode()
+    args = parse_args()
+    benchmark = BenchmarkMode(freq_cap=args.freq_cap)
 
     # Register cleanup handler
     atexit.register(benchmark.cleanup)
