@@ -46,6 +46,9 @@ cat > "$SUDOERS_FILE" << EOF
 
 # Allow dmesg for monitoring scheduler messages
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/dmesg
+
+# Allow basic commands for testing sudo setup
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/ls, /usr/bin/pwd
 EOF
 
 # Add scheduler line only if we found it
@@ -103,6 +106,7 @@ fi
 echo ""
 echo "The following commands can now run without password:"
 echo "  - sudo dmesg"
+echo "  - sudo ls, sudo pwd (for testing)"
 if [ -n "$SCX_LAVD_PATH" ]; then
     echo "  - sudo $SCX_LAVD_PATH"
 fi
