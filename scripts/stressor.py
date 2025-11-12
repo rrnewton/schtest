@@ -467,12 +467,15 @@ class RTAppStressor(Stressor):
         # Add memory stressor threads
         for i, mem_stress in enumerate(self.mem_stressors):
             mem_buffer_size = self._parse_memory_size(mem_stress['bytes_per_worker'])
+            # Cap per-task memory allocation to avoid crashes
+            # Use the capped value from max_mem_buffer calculation
+            capped_mem_size = min(mem_buffer_size, max_mem_buffer)
 
             for instance in range(mem_stress['count']):
                 thread_name = f"mem_{i}_{instance}"
                 thread_config = {
                     "loop": -1,  # Run until duration expires
-                    "mem": mem_buffer_size,  # Write entire buffer per iteration (matches stress-ng)
+                    "mem": capped_mem_size,  # Use capped size to prevent crashes
                 }
 
                 # Add CPU affinity if specified
@@ -643,9 +646,10 @@ set -xeuo pipefail
             mem_thread_id = total_cpu_threads  # First mem thread ID
 
             mem_log = self.output_dir / f"rt-app-mem_0_0-{mem_thread_id}.log"
-            # Get buffer size from first memory stressor
+            # Get buffer size from first memory stressor, capped to 1GB to match actual allocation
             buffer_size = self._parse_memory_size(self.mem_stressors[0]['bytes_per_worker'])
-            mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=buffer_size)
+            capped_buffer_size = min(buffer_size, 1024 * 1024 * 1024)
+            mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=capped_buffer_size)
 
         # When both workloads run together, use the same real_time for both
         # (they finish at the same time when duration expires)
