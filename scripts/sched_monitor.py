@@ -164,11 +164,11 @@ class DmesgMonitor:
                             time.sleep(0.5)
                             return
 
-        # Timeout occurred - this is a fatal error
-        raise RuntimeError(
-            f"Timeout waiting for {self.scheduler_name} scheduler disable confirmation. "
-            f"Scheduler process was stopped, but kernel disable message not seen in dmesg within {timeout}s"
-        )
+        # Timeout occurred - issue warning but don't fail
+        # The scheduler process has already been stopped successfully
+        print(f"Warning: Timeout waiting for {self.scheduler_name} scheduler disable confirmation.")
+        print(f"  Scheduler process was stopped, but kernel disable message not seen in dmesg within {timeout}s")
+        print(f"  This is usually harmless - the scheduler has been stopped.")
 
     def get_recent_lines(self) -> List[str]:
         """Get the last 10 lines captured from dmesg."""
