@@ -1,10 +1,13 @@
 //! Spinner workload implementation.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Maximum number of CPUs we support for per-CPU tracking.
 const MAX_CPUS: usize = 1024;
+
+/// Maximum number of migration events we can log.
+const MAX_LOG_ENTRIES: usize = 100000;
 
 /// A (time_nanos, cpu_id) pair representing a migration event.
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +33,14 @@ pub struct Spinner {
     initial_run_nanos: AtomicU64,
     /// Count of observed migrations.
     observed_migrations: AtomicU64,
+    /// Migration log: timestamps for each event.
+    migration_log_times: [AtomicU64; MAX_LOG_ENTRIES],
+    /// Migration log: CPU IDs for each event.
+    migration_log_cpus: [AtomicU32; MAX_LOG_ENTRIES],
+    /// Count of entries in the migration log.
+    log_count: AtomicU64,
+    /// Whether we've overflowed the log by dropping events.
+    log_overflowed: AtomicBool,
 }
 
 impl Spinner {
@@ -43,8 +54,14 @@ impl Spinner {
     /// * `baseline` - The baseline instant from which to measure CPU change times
     pub fn new(baseline: Instant) -> Self {
         // Initialize per-CPU migration table with u64::MAX (never migrated)
-        const INIT: AtomicU64 = AtomicU64::new(u64::MAX);
-        let last_migration_nanos = [INIT; MAX_CPUS];
+        const INIT_U64: AtomicU64 = AtomicU64::new(u64::MAX);
+        let last_migration_nanos = [INIT_U64; MAX_CPUS];
+
+        // Initialize migration log arrays
+        const INIT_LOG_TIME: AtomicU64 = AtomicU64::new(0);
+        const INIT_LOG_CPU: AtomicU32 = AtomicU32::new(0);
+        let migration_log_times = [INIT_LOG_TIME; MAX_LOG_ENTRIES];
+        let migration_log_cpus = [INIT_LOG_CPU; MAX_LOG_ENTRIES];
 
         Self {
             cpu_id: AtomicU32::new(0),
@@ -52,6 +69,10 @@ impl Spinner {
             last_migration_nanos,
             initial_run_nanos: AtomicU64::new(0),
             observed_migrations: AtomicU64::new(0),
+            migration_log_times,
+            migration_log_cpus,
+            log_count: AtomicU64::new(0),
+            log_overflowed: AtomicBool::new(false),
         }
     }
 
@@ -114,6 +135,10 @@ impl Spinner {
                     }
                     // Count initial placement as first "migration"
                     self.observed_migrations.store(1, Ordering::Relaxed);
+
+                    // Append to migration log
+                    self.append_to_log(cpu, nanos_since_baseline);
+
                     last_cpu = cpu;
                     first_observation = false;
                 }
@@ -129,42 +154,82 @@ impl Spinner {
 
                     // Store the current CPU ID (after updating the table)
                     self.cpu_id.store(cpu, Ordering::Relaxed);
+
+                    // Append to migration log
+                    self.append_to_log(cpu, nanos_since_baseline);
+
                     last_cpu = cpu;
                 }
             }
         }
     }
 
-    /// Get the migration history from the per-CPU tracking table.
+    /// Append a migration event to the log.
     ///
-    /// This collects all CPUs that have been visited and returns them sorted by time.
-    /// Note: If a thread migrates back to a CPU it visited before, only the most recent
-    /// visit is recorded. Therefore, the number of entries may be less than
-    /// `observed_migrations()`.
+    /// # Arguments
+    ///
+    /// * `cpu` - The CPU ID
+    /// * `time_nanos` - The timestamp in nanoseconds since baseline
+    fn append_to_log(&self, cpu: u32, time_nanos: u64) {
+        // Use fetch_add to atomically get the next index
+        let index = self.log_count.fetch_add(1, Ordering::Relaxed);
+
+        if index < MAX_LOG_ENTRIES as u64 {
+            // We have space - write the entry
+            self.migration_log_cpus[index as usize].store(cpu, Ordering::Relaxed);
+            self.migration_log_times[index as usize].store(time_nanos, Ordering::Relaxed);
+        } else {
+            // Log is full - set overflow flag
+            self.log_overflowed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Get the complete migration history from the log.
+    ///
+    /// This collects all migration events that were recorded in the log, in chronological
+    /// order. If the log overflowed, the returned history will be incomplete.
     ///
     /// This should be called after the spinner has stopped spinning.
     ///
     /// # Returns
     ///
-    /// A sorted vector of migration events (one per unique CPU visited).
-    pub fn full_migration_history(&self) -> Vec<MigrationEvent> {
+    /// A tuple of (history_vec, observed_migrations_count):
+    /// - history_vec: A sorted vector of migration events from the log
+    /// - observed_migrations_count: The total number of migrations observed
+    ///
+    /// If the log did not overflow, the vector length will match observed_migrations_count.
+    pub fn full_migration_history(&self) -> (Vec<MigrationEvent>, u64) {
         let mut history = Vec::new();
+        let observed = self.observed_migrations.load(Ordering::Relaxed);
+        let log_entries = self.log_count.load(Ordering::Relaxed);
+        let overflowed = self.log_overflowed.load(Ordering::Relaxed);
 
-        // Collect all entries from the last_migration_nanos table
-        for (cpu_id, entry) in self.last_migration_nanos.iter().enumerate() {
-            let time_nanos = entry.load(Ordering::Relaxed);
-            if time_nanos != u64::MAX {
-                history.push(MigrationEvent {
-                    time_nanos,
-                    cpu_id: cpu_id as u32,
-                });
-            }
+        // Collect from the log (up to MAX_LOG_ENTRIES)
+        let entries_to_read = std::cmp::min(log_entries, MAX_LOG_ENTRIES as u64);
+        for i in 0..entries_to_read {
+            let cpu_id = self.migration_log_cpus[i as usize].load(Ordering::Relaxed);
+            let time_nanos = self.migration_log_times[i as usize].load(Ordering::Relaxed);
+            history.push(MigrationEvent {
+                cpu_id,
+                time_nanos,
+            });
         }
 
-        // Sort by time
+        // Sort by time (should already be mostly sorted, but ensure it)
         history.sort_by_key(|e| e.time_nanos);
 
-        history
+        // If we didn't overflow, the vector length should exactly match observed migrations
+        if !overflowed {
+            assert_eq!(
+                history.len() as u64,
+                observed,
+                "Migration history length mismatch: got {} events but observed {} migrations (no overflow)",
+                history.len(),
+                observed
+            );
+        }
+
+        (history, observed)
     }
 
     /// Get the ID of the CPU that the current thread is running on.
@@ -202,6 +267,16 @@ mod tests {
         println!("Last CPU: {}, migrated at {} ns", cpu_id, time_nanos);
         println!("Initial run: {} ns", spinner.initial_run_nanos());
         println!("Observed migrations: {}", spinner.observed_migrations());
+
+        // Verify migration history
+        let (history, observed) = spinner.full_migration_history();
+        println!("Migration history: {} events logged, {} observed total", history.len(), observed);
+        assert_eq!(history.len() as u64, observed, "All migrations should be logged");
+
+        // Print the first few migration events
+        for (i, event) in history.iter().take(5).enumerate() {
+            println!("  Migration {}: CPU {} at {} ns", i, event.cpu_id, event.time_nanos);
+        }
 
         Ok(())
     }
