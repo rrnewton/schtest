@@ -65,7 +65,10 @@ fn spread_out() -> Result<()> {
         let migration_timeout = Duration::from_millis(100);
         let migration_start = Instant::now();
         loop {
-            let all_on_first_core = spinners.iter().all(|s| s.last_cpu() == first_core_id);
+            let all_on_first_core = spinners.iter().all(|s| {
+                let (cpu_id, _time) = s.last_cpu();
+                cpu_id == first_core_id
+            });
             if all_on_first_core {
                 break;
             }
@@ -105,7 +108,7 @@ fn spread_out() -> Result<()> {
         for _ in 0..iters / 10 {
             thread::sleep(Duration::from_millis(10));
             for spinner in &spinners {
-                let cpu_id = spinner.last_cpu();
+                let (cpu_id, _time) = spinner.last_cpu();
                 if let Some(&physical_id) = logical_to_physical.get(&(cpu_id as i32)) {
                     *counts.entry(physical_id).or_insert(0) += 1;
                 }
@@ -117,8 +120,11 @@ fn spread_out() -> Result<()> {
                 reached_full_spread = true;
                 // Collect all migration times
                 let migration_times: Vec<u64> = spinners.iter()
-                    .map(|s| s.last_cpu_change_nanos())
-                    .filter(|&t| t >= t_start_nanos)
+                    .map(|s| {
+                        let (_cpu_id, time) = s.last_cpu();
+                        time
+                    })
+                    .filter(|&t| t != u64::MAX && t >= t_start_nanos)
                     .collect();
 
                 if !migration_times.is_empty() {
@@ -237,7 +243,8 @@ fn come_together() -> Result<()> {
             for spinner_set in &spinners {
                 let mut complex = None;
                 for spinner in spinner_set {
-                    let cpu = spinner.last_cpu() as i32;
+                    let (cpu_id, _time) = spinner.last_cpu();
+                    let cpu = cpu_id as i32;
                     let local_complex = logical_to_physical[&cpu];
                     match complex {
                         Some(c) if c != local_complex => {
