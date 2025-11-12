@@ -437,13 +437,17 @@ class RTAppStressor(Stressor):
         """Generate rt-app JSON configuration."""
         tasks = {}
 
-        # Determine max memory buffer size from all memory stressors
+        # The mem_buffer_size in global section is the shared buffer for all threads
+        # Use a reasonable size based on the largest per-worker request, not the sum
+        # Cap at 1GB to avoid excessive memory allocation
         max_mem_buffer = 4 * 1024 * 1024  # Default 4MB
         if self.mem_stressors:
-            max_mem_buffer = max(
+            max_per_worker = max(
                 self._parse_memory_size(mem['bytes_per_worker'])
                 for mem in self.mem_stressors
             )
+            # Use the max per-worker size, but cap at 1GB
+            max_mem_buffer = min(max_per_worker, 1024 * 1024 * 1024)
 
         # Add CPU stressor threads
         for i, cpu_stress in enumerate(self.cpu_stressors):
@@ -487,6 +491,7 @@ class RTAppStressor(Stressor):
                 "pi_enabled": False,
                 "lock_pages": False,
                 "mem_buffer_size": max_mem_buffer,
+                "logdir": str(self.output_dir),
             }
         }
 
@@ -548,13 +553,33 @@ set -xeuo pipefail
             StressMetrics with equivalent bogo-ops, or None if file doesn't exist
         """
         if not log_file.exists():
+            print(f"Warning: rt-app log file not found: {log_file}")
             return None
 
         try:
             import pandas as pd
-            df = pd.read_csv(log_file, delim_whitespace=True, comment='#')
+
+            # rt-app logs have a header line starting with # that we need to parse
+            # Read the header separately to extract column names
+            with open(log_file, 'r') as f:
+                header_line = f.readline().strip()
+
+            # Remove leading '#' and split on whitespace
+            if header_line.startswith('#'):
+                column_names = header_line[1:].split()
+            else:
+                print(f"Error: Expected header line starting with '#' in {log_file}")
+                return None
+
+            # Now read the data, skipping the header line
+            df = pd.read_csv(log_file, sep=r'\s+', skiprows=1, names=column_names)
 
             # rt-app logs have columns: idx, perf, run, period, start, end, rel_st, slack, c_duration, c_period, wu_lat
+            if 'perf' not in df.columns:
+                print(f"Error: 'perf' column not found in {log_file}")
+                print(f"  Available columns: {list(df.columns)}")
+                return None
+
             total_perf = df['perf'].sum()
 
             # Calculate total runtime in seconds
@@ -606,12 +631,18 @@ set -xeuo pipefail
 
         # Parse CPU metrics from first CPU thread log
         if self.cpu_stressors:
+            # First CPU task is always thread 0
             cpu_log = self.output_dir / "rt-app-cpu_0_0-0.log"
             cpu_metrics = self._parse_rt_app_log(cpu_log)
 
         # Parse memory metrics from first memory thread log
         if self.mem_stressors:
-            mem_log = self.output_dir / "rt-app-mem_0_0-1.log"
+            # When both CPU and mem run together, mem threads start after CPU threads
+            # Calculate total number of CPU threads to determine mem thread start ID
+            total_cpu_threads = sum(cpu_stress['count'] for cpu_stress in self.cpu_stressors) if self.cpu_stressors else 0
+            mem_thread_id = total_cpu_threads  # First mem thread ID
+
+            mem_log = self.output_dir / f"rt-app-mem_0_0-{mem_thread_id}.log"
             # Get buffer size from first memory stressor
             buffer_size = self._parse_memory_size(self.mem_stressors[0]['bytes_per_worker'])
             mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=buffer_size)
