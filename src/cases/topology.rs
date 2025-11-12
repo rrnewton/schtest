@@ -138,8 +138,8 @@ fn spread_out() -> Result<()> {
         ctx.wait()?;
 
         // Print the migration metrics
-        println!("MaxTimeToMigrate: {} ns", max_time_to_migrate);
-        println!("AvgTimeToMigrate: {} ns", avg_time_to_migrate);
+        println!("MaxTimeToMigrate: {:.3} ms", max_time_to_migrate as f64 / 1_000_000.0);
+        println!("AvgTimeToMigrate: {:.3} ms", avg_time_to_migrate as f64 / 1_000_000.0);
 
         let mut delta_migrations = 0;
         for handle in handles.iter() {
