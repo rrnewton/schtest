@@ -192,6 +192,9 @@ class StressNGStressor(Stressor):
         try:
             with open(yaml_file, 'r') as f:
                 data = yaml.safe_load(f)
+            if data is None:
+                print(f"Warning: Empty or invalid YAML file {yaml_file}, skipping")
+                return None
             metrics_list = data.get('metrics', [{}])
             if not metrics_list or not isinstance(metrics_list, list):
                 return None
@@ -202,7 +205,8 @@ class StressNGStressor(Stressor):
                 real_time=metrics.get('wall-clock-time', 0.0)
             )
         except Exception as e:
-            print(f"Error parsing YAML file {yaml_file}: {e}")
+            print(f"Warning: Could not parse stress-ng YAML file {yaml_file}: {e}")
+            print(f"  (This may be from an incomplete or corrupted run, skipping)")
             return None
 
     def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
@@ -593,6 +597,9 @@ set -xeuo pipefail
         - iteration count: number of times workload ran (for memory work)
 
         We convert these to equivalent stress-ng bogo-ops for comparability.
+
+        When both CPU and mem workloads run together, they finish at the same time
+        (duration expiry), so we normalize their real_time to the maximum observed.
         """
         cpu_metrics = None
         mem_metrics = None
@@ -608,5 +615,23 @@ set -xeuo pipefail
             # Get buffer size from first memory stressor
             buffer_size = self._parse_memory_size(self.mem_stressors[0]['bytes_per_worker'])
             mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=buffer_size)
+
+        # When both workloads run together, use the same real_time for both
+        # (they finish at the same time when duration expires)
+        if cpu_metrics and mem_metrics and self.cpu_stressors and self.mem_stressors:
+            # Use the maximum real_time as the true experiment duration
+            max_real_time = max(cpu_metrics.real_time, mem_metrics.real_time)
+
+            # Recalculate bogo_ops_per_sec with normalized time
+            cpu_metrics = StressMetrics(
+                bogo_ops=cpu_metrics.bogo_ops,
+                bogo_ops_per_sec_cpu_time=cpu_metrics.bogo_ops / max_real_time if max_real_time > 0 else 0.0,
+                real_time=max_real_time
+            )
+            mem_metrics = StressMetrics(
+                bogo_ops=mem_metrics.bogo_ops,
+                bogo_ops_per_sec_cpu_time=mem_metrics.bogo_ops / max_real_time if max_real_time > 0 else 0.0,
+                real_time=max_real_time
+            )
 
         return cpu_metrics, mem_metrics

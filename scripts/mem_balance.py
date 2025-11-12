@@ -849,19 +849,26 @@ class ExperimentRunner:
             both_workloads['time_ratio'] = both_workloads['real_time_mem'] / both_workloads['real_time_cpu']
             both_workloads['skew_percent'] = (both_workloads['time_ratio'] - 1.0) * 100
 
-            max_skew = both_workloads['skew_percent'].abs().max()
-            median_skew = both_workloads['skew_percent'].median()
-            mean_skew = both_workloads['skew_percent'].mean()
+            # Filter out NaN values for statistics
+            valid_skew = both_workloads['skew_percent'].dropna()
 
-            print(f"Max skew:     {max_skew:6.1f}% (memory workload time vs CPU workload time)")
-            print(f"Median skew:  {median_skew:6.1f}%")
-            print(f"Average skew: {mean_skew:6.1f}%")
+            if len(valid_skew) > 0:
+                max_skew = valid_skew.abs().max()
+                median_skew = valid_skew.median()
+                mean_skew = valid_skew.mean()
 
-            # Show the worst offenders
-            worst_case = both_workloads.loc[both_workloads['skew_percent'].abs().idxmax()]
-            print(f"\nWorst case: {worst_case['scheduler']}/{worst_case['pinning']}")
-            print(f"  CPU time: {worst_case['real_time_cpu']:.2f}s, MEM time: {worst_case['real_time_mem']:.2f}s")
-            print(f"  Skew: {worst_case['skew_percent']:.1f}%")
+                print(f"Max skew:     {max_skew:6.1f}% (memory workload time vs CPU workload time)")
+                print(f"Median skew:  {median_skew:6.1f}%")
+                print(f"Average skew: {mean_skew:6.1f}%")
+
+                # Show the worst offenders (only if we have valid data)
+                worst_idx = valid_skew.abs().idxmax()
+                worst_case = both_workloads.loc[worst_idx]
+                print(f"\nWorst case: {worst_case['scheduler']}/{worst_case['pinning']}")
+                print(f"  CPU time: {worst_case['real_time_cpu']:.2f}s, MEM time: {worst_case['real_time_mem']:.2f}s")
+                print(f"  Skew: {worst_case['skew_percent']:.1f}%")
+            else:
+                print("No valid timing data available for skew analysis")
 
         # Print summary table
         print("\nSummary Results:")
