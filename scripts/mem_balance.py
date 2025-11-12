@@ -446,6 +446,7 @@ class ExperimentRunner:
         self._ensure_scheduler(scheduler)
 
         # Run experiment with perf wrapping the stressor execution
+        perf_raw_file = run_dir / "perf_raw.log"
         perf_output_file = run_dir / "perf.json"
         stress_script = run_dir / "stress.sh"
         perf_cmd = [
@@ -463,18 +464,26 @@ class ExperimentRunner:
             f.write(script_content)
         os.chmod(stress_script, 0o755)
 
-        # Run with perf
-        with open(perf_output_file, 'w') as perf_file:
+        # Run with perf - capture raw output including rt-app notices
+        with open(perf_raw_file, 'w') as raw_file:
             result = subprocess.run(
                 perf_cmd,
                 stdout=subprocess.PIPE,
-                stderr=perf_file,
+                stderr=raw_file,
                 text=True
             )
 
         if result.returncode != 0:
             print(f"Warning: Experiment failed with return code {result.returncode}")
             print(f"stdout: {result.stdout}")
+
+        # Filter raw output to extract only JSON lines (perf output)
+        # rt-app notices are mixed in with perf JSON, so we need to filter
+        with open(perf_raw_file, 'r') as raw_file, open(perf_output_file, 'w') as json_file:
+            for line in raw_file:
+                # Only keep lines that start with '{' (JSON objects from perf)
+                if line.strip().startswith('{'):
+                    json_file.write(line)
 
         # Parse results using stressor abstraction
         cpu_metrics, mem_metrics = stressor_obj.get_metrics()
