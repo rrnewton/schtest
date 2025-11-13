@@ -13,6 +13,125 @@ use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
+use std::collections::HashMap;
+
+/// Per-CPU interrupt counts parsed from /proc/interrupts
+#[derive(Debug, Clone)]
+struct InterruptSnapshot {
+    /// Total interrupt count per CPU (sum of all interrupt types)
+    per_cpu_total: HashMap<usize, u64>,
+    /// Rescheduling interrupts (RES) - IPIs for rescheduling
+    per_cpu_reschedule: HashMap<usize, u64>,
+    /// Function call interrupts (CAL) - IPIs for function calls
+    per_cpu_function_call: HashMap<usize, u64>,
+    /// TLB shootdown interrupts (TLB) - IPIs for TLB invalidation
+    per_cpu_tlb: HashMap<usize, u64>,
+    /// Number of CPUs detected
+    num_cpus: usize,
+}
+
+impl InterruptSnapshot {
+    /// Parse /proc/interrupts and sum all interrupt types per CPU
+    fn capture() -> Result<Self> {
+        let data = std::fs::read_to_string("/proc/interrupts")
+            .context("Failed to read /proc/interrupts")?;
+
+        let mut lines = data.lines();
+
+        // First line contains CPU headers: "CPU0  CPU1  CPU2  ..."
+        let header = lines.next().ok_or_else(|| anyhow::anyhow!("Empty /proc/interrupts"))?;
+        let num_cpus = header.split_whitespace().count();
+
+        let mut per_cpu_total: HashMap<usize, u64> = HashMap::new();
+        let mut per_cpu_reschedule: HashMap<usize, u64> = HashMap::new();
+        let mut per_cpu_function_call: HashMap<usize, u64> = HashMap::new();
+        let mut per_cpu_tlb: HashMap<usize, u64> = HashMap::new();
+
+        for cpu in 0..num_cpus {
+            per_cpu_total.insert(cpu, 0);
+            per_cpu_reschedule.insert(cpu, 0);
+            per_cpu_function_call.insert(cpu, 0);
+            per_cpu_tlb.insert(cpu, 0);
+        }
+
+        // Parse each interrupt line
+        for line in lines {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+
+            // Identify interrupt type
+            let is_reschedule = line.contains("Rescheduling interrupts");
+            let is_function_call = line.contains("Function call interrupts");
+            let is_tlb = line.contains("TLB shootdowns");
+
+            // Skip the interrupt number/name (first column)
+            // Next num_cpus columns are the counts per CPU
+            for (cpu_idx, count_str) in parts.iter().skip(1).take(num_cpus).enumerate() {
+                if let Ok(count) = count_str.parse::<u64>() {
+                    *per_cpu_total.entry(cpu_idx).or_insert(0) += count;
+
+                    if is_reschedule {
+                        *per_cpu_reschedule.entry(cpu_idx).or_insert(0) += count;
+                    } else if is_function_call {
+                        *per_cpu_function_call.entry(cpu_idx).or_insert(0) += count;
+                    } else if is_tlb {
+                        *per_cpu_tlb.entry(cpu_idx).or_insert(0) += count;
+                    }
+                }
+            }
+        }
+
+        Ok(InterruptSnapshot {
+            per_cpu_total,
+            per_cpu_reschedule,
+            per_cpu_function_call,
+            per_cpu_tlb,
+            num_cpus,
+        })
+    }
+
+    /// Calculate delta from another snapshot (self - other)
+    fn delta(&self, other: &InterruptSnapshot) -> InterruptDelta {
+        let mut total = HashMap::new();
+        let mut reschedule = HashMap::new();
+        let mut function_call = HashMap::new();
+        let mut tlb = HashMap::new();
+
+        for cpu in 0..self.num_cpus {
+            total.insert(cpu,
+                *self.per_cpu_total.get(&cpu).unwrap_or(&0) as i64 -
+                *other.per_cpu_total.get(&cpu).unwrap_or(&0) as i64);
+            reschedule.insert(cpu,
+                *self.per_cpu_reschedule.get(&cpu).unwrap_or(&0) as i64 -
+                *other.per_cpu_reschedule.get(&cpu).unwrap_or(&0) as i64);
+            function_call.insert(cpu,
+                *self.per_cpu_function_call.get(&cpu).unwrap_or(&0) as i64 -
+                *other.per_cpu_function_call.get(&cpu).unwrap_or(&0) as i64);
+            tlb.insert(cpu,
+                *self.per_cpu_tlb.get(&cpu).unwrap_or(&0) as i64 -
+                *other.per_cpu_tlb.get(&cpu).unwrap_or(&0) as i64);
+        }
+
+        InterruptDelta {
+            total,
+            reschedule,
+            function_call,
+            tlb,
+        }
+    }
+}
+
+/// Delta of interrupt counts between two snapshots
+#[derive(Debug)]
+struct InterruptDelta {
+    total: HashMap<usize, i64>,
+    reschedule: HashMap<usize, i64>,
+    function_call: HashMap<usize, i64>,
+    tlb: HashMap<usize, i64>,
+}
+
 /// Different methods for generating IRQ load on the victim CPU
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IrqDisruptionMode {
@@ -533,6 +652,10 @@ fn irq_disruption_targeted() -> Result<()> {
         .build(hierarchies::auto())
         .context("Failed to create cgroup for CPU 2")?;
 
+    // Capture interrupt counts before the test
+    eprintln!("\nCapturing interrupt baseline...");
+    let interrupts_before = InterruptSnapshot::capture()?;
+
     // Launch IRQ disruption based on selected mode
     eprintln!("\nLaunching IRQ disruption...");
     let irq_handle = match DISRUPTION_MODE {
@@ -605,6 +728,10 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("Stopping IRQ disruption...");
     let stats = irq_handle.stop()?;
 
+    // Capture interrupt counts after the test
+    let interrupts_after = InterruptSnapshot::capture()?;
+    let interrupt_delta = interrupts_after.delta(&interrupts_before);
+
     // Report stats based on mode
     match stats {
         IrqDisruptionStats::Futex {
@@ -631,6 +758,50 @@ fn irq_disruption_targeted() -> Result<()> {
             eprintln!("PMU sampling configured at {} Hz on CPU {}", IRQ_HZ, CPU_1);
             eprintln!("(PMIs delivered as NMI-like interrupts throughout test)");
         }
+    }
+
+    // Report interrupt deltas per CPU
+    eprintln!("\n=== Interrupt Counts (Delta During Test) ===");
+    eprintln!("{:>6} {:>15} {:>15} {:>15} {:>15}", "CPU", "Total", "Reschedule", "Func Call", "TLB");
+
+    // Collect key CPUs
+    let key_cpus = vec![
+        (WAKER_CPU as usize, "WAKER"),
+        (CPU_1 as usize, "VICTIM"),
+        (CPU_2 as usize, "CONTROL"),
+    ];
+
+    for (cpu, label) in &key_cpus {
+        let total = *interrupt_delta.total.get(cpu).unwrap_or(&0);
+        let reschedule = *interrupt_delta.reschedule.get(cpu).unwrap_or(&0);
+        let function_call = *interrupt_delta.function_call.get(cpu).unwrap_or(&0);
+        let tlb = *interrupt_delta.tlb.get(cpu).unwrap_or(&0);
+
+        eprintln!("{:>6} {:>15} {:>15} {:>15} {:>15}  <-- {}",
+                  cpu, total, reschedule, function_call, tlb, label);
+    }
+
+    // Calculate IPI totals (reschedule + function_call + tlb)
+    let victim_total = *interrupt_delta.total.get(&(CPU_1 as usize)).unwrap_or(&0);
+    let victim_ipis = *interrupt_delta.reschedule.get(&(CPU_1 as usize)).unwrap_or(&0)
+        + *interrupt_delta.function_call.get(&(CPU_1 as usize)).unwrap_or(&0)
+        + *interrupt_delta.tlb.get(&(CPU_1 as usize)).unwrap_or(&0);
+
+    let control_total = *interrupt_delta.total.get(&(CPU_2 as usize)).unwrap_or(&0);
+    let control_ipis = *interrupt_delta.reschedule.get(&(CPU_2 as usize)).unwrap_or(&0)
+        + *interrupt_delta.function_call.get(&(CPU_2 as usize)).unwrap_or(&0)
+        + *interrupt_delta.tlb.get(&(CPU_2 as usize)).unwrap_or(&0);
+
+    eprintln!("\nInterrupt Summary:");
+    eprintln!("  Victim CPU {} total interrupts: {} (IPIs: {})", CPU_1, victim_total, victim_ipis);
+    eprintln!("  Control CPU {} total interrupts: {} (IPIs: {})", CPU_2, control_total, control_ipis);
+
+    if victim_ipis > control_ipis * 2 {
+        eprintln!("  ✓ Victim CPU has {}x more IPIs than control",
+                  victim_ipis / control_ipis.max(1));
+    } else {
+        eprintln!("  ⚠ Victim CPU IPI rate similar to control (ratio: {:.2}x)",
+                  victim_ipis as f64 / control_ipis.max(1) as f64);
     }
 
     // Clean up cgroups
