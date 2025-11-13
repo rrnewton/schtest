@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant};
 use std::arch::asm;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use serde::{Serialize, Deserialize};
+use crate::util::shared::SharedBox;
 
 /// Minimum TSC cycle gap to consider as a descheduling event
 const MIN_DESCHEDULE_CYCLES: u64 = 1000;
@@ -37,7 +39,9 @@ pub struct Percentiles {
 pub struct BenchmarkResults {
     pub tsc_frequency: u64,
     pub time_scheduled_ns: u64,
-    pub total_iterations: u64,
+    /// Number of loop iterations completed (bogo ops) - represents work done,
+    /// distinct from time_scheduled_ns which measures how long the process was scheduled
+    pub bogo_ops: u64,
     pub total_tsc_ticks: u64,
     pub per_window_stats: Vec<WindowStat>,
     pub percentiles: Percentiles,
@@ -408,7 +412,7 @@ fn compute_results(
         BenchmarkResults {
             tsc_frequency: tsc_hz,
             time_scheduled_ns: scheduled_ns,
-            total_iterations: count,
+            bogo_ops: count,
             total_tsc_ticks: total_cycles,
             per_window_stats: json_window_stats,
             percentiles: percentile_values,
@@ -418,7 +422,7 @@ fn compute_results(
         BenchmarkResults {
             tsc_frequency: tsc_hz,
             time_scheduled_ns: scheduled_ns,
-            total_iterations: count,
+            bogo_ops: count,
             total_tsc_ticks: total_cycles,
             per_window_stats: vec![],
             percentiles: Percentiles {
@@ -430,4 +434,34 @@ fn compute_results(
             },
         }
     }
+}
+
+/// CPU hog workload using spinner_utilization to measure actual scheduled time.
+///
+/// This function waits for a start signal, then runs a CPU-intensive spinner
+/// for the specified duration, measuring the actual time scheduled via TSC.
+/// The scheduled time (in nanoseconds) is written to shared memory.
+///
+/// # Arguments
+/// * `duration` - How long to run the spinner
+/// * `start_signal` - Shared atomic flag; spins until this becomes non-zero
+/// * `scheduled_ns_out` - Shared atomic where the scheduled time (ns) will be written
+pub fn cpu_hog_workload(
+    duration: Duration,
+    start_signal: SharedBox<AtomicU32>,
+    scheduled_ns_out: SharedBox<AtomicU64>,
+) {
+    // Get TSC frequency (non-verbose)
+    let tsc_hz = get_tsc_hz(false);
+
+    // Wait for start signal
+    while start_signal.load(Ordering::Acquire) == 0 {
+        std::hint::spin_loop();
+    }
+
+    // Run spinner for the specified duration
+    let results = run_spinner(duration, tsc_hz, false);
+
+    // Write scheduled time (in nanoseconds) to shared memory
+    scheduled_ns_out.store(results.time_scheduled_ns, Ordering::Release);
 }

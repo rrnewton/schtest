@@ -98,27 +98,6 @@ pub struct CGroupTreeNode {
     pub children: Vec<CGroupTreeNode>,
 }
 
-/// CPU hog workload using spinner_utilization to measure actual scheduled time
-fn cpu_hog_workload(
-    duration: Duration,
-    start_signal: SharedBox<AtomicU32>,
-    scheduled_ns_out: SharedBox<AtomicU64>,
-) {
-    // Get TSC frequency (non-verbose)
-    let tsc_hz = spinner_utilization::get_tsc_hz(false);
-
-    // Wait for start signal
-    while start_signal.load(Ordering::Acquire) == 0 {
-        std::hint::spin_loop();
-    }
-
-    // Run spinner for the specified duration
-    let results = spinner_utilization::run_spinner(duration, tsc_hz, false);
-
-    // Write scheduled time (in nanoseconds) to shared memory
-    scheduled_ns_out.store(results.time_scheduled_ns, Ordering::Release);
-}
-
 /// A handle to a launched CPU hog process
 pub struct CGroupHog {
     child: Child,
@@ -628,7 +607,7 @@ impl ActualizedCGroupTree {
             let child = Child::run(
                 move || {
                     // Just run the CPU hog - parent will add us to cgroup
-                    cpu_hog_workload(duration, start_signal_clone, scheduled_ns_out);
+                    spinner_utilization::cpu_hog_workload(duration, start_signal_clone, scheduled_ns_out);
                     Ok(())
                 },
                 None,
