@@ -166,6 +166,7 @@ fn irq_disruption_targeted() -> Result<()> {
     const VICTIM_CPU: i32 = 1;
     const WAKER_CPU: i32 = 0;
     const IRQ_HZ: u64 = 10000;
+    const PERFORM_IRQ_DISRUPTION: bool = true;
 
     let system = System::load()?;
 
@@ -379,26 +380,77 @@ fn irq_disruption_targeted() -> Result<()> {
         return Err(anyhow::anyhow!("No results collected"));
     }
 
-    // Sort by bogo_ops to find min/max
+    // Bogo ops statistics
     let mut bogo_ops_only: Vec<u64> = bogo_ops_results.iter().map(|(_, ops)| *ops).collect();
     bogo_ops_only.sort_unstable();
 
-    let min_bogo_ops = bogo_ops_only.first().unwrap();
-    let max_bogo_ops = bogo_ops_only.last().unwrap();
+    let min_bogo_ops = *bogo_ops_only.first().unwrap();
+    let max_bogo_ops = *bogo_ops_only.last().unwrap();
     let sum_bogo_ops: u64 = bogo_ops_only.iter().sum();
     let avg_bogo_ops = sum_bogo_ops / num_hogs as u64;
 
-    // Calculate p50 (median)
     let p50_bogo_ops = if num_hogs % 2 == 0 {
         (bogo_ops_only[num_hogs / 2 - 1] + bogo_ops_only[num_hogs / 2]) / 2
     } else {
         bogo_ops_only[num_hogs / 2]
     };
 
-    // Calculate maximum skew
-    let max_skew = max_bogo_ops - min_bogo_ops;
-    let skew_pct = if *max_bogo_ops > 0 {
-        (max_skew as f64 / *max_bogo_ops as f64) * 100.0
+    let bogo_ops_skew = max_bogo_ops - min_bogo_ops;
+    let bogo_ops_skew_pct = if max_bogo_ops > 0 {
+        (bogo_ops_skew as f64 / max_bogo_ops as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Scheduled nanoseconds statistics
+    let mut scheduled_ns_only = scheduled_ns_results.clone();
+    scheduled_ns_only.sort_unstable();
+
+    let min_scheduled_ns = *scheduled_ns_only.first().unwrap();
+    let max_scheduled_ns = *scheduled_ns_only.last().unwrap();
+    let sum_scheduled_ns: u64 = scheduled_ns_only.iter().sum();
+    let avg_scheduled_ns = sum_scheduled_ns / num_hogs as u64;
+
+    let p50_scheduled_ns = if num_hogs % 2 == 0 {
+        (scheduled_ns_only[num_hogs / 2 - 1] + scheduled_ns_only[num_hogs / 2]) / 2
+    } else {
+        scheduled_ns_only[num_hogs / 2]
+    };
+
+    let scheduled_ns_skew = max_scheduled_ns - min_scheduled_ns;
+    let scheduled_ns_skew_pct = if max_scheduled_ns > 0 {
+        (scheduled_ns_skew as f64 / max_scheduled_ns as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Bogo ops per millisecond
+    let bogo_ops_per_ms: Vec<(i32, f64)> = bogo_ops_results.iter()
+        .zip(scheduled_ns_results.iter())
+        .map(|((cpu_id, ops), ns)| {
+            let ms = *ns as f64 / 1_000_000.0;
+            let ops_per_ms = if ms > 0.0 { *ops as f64 / ms } else { 0.0 };
+            (*cpu_id, ops_per_ms)
+        })
+        .collect();
+
+    let mut ops_per_ms_only: Vec<f64> = bogo_ops_per_ms.iter().map(|(_, rate)| *rate).collect();
+    ops_per_ms_only.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let min_ops_per_ms = *ops_per_ms_only.first().unwrap();
+    let max_ops_per_ms = *ops_per_ms_only.last().unwrap();
+    let sum_ops_per_ms: f64 = ops_per_ms_only.iter().sum();
+    let avg_ops_per_ms = sum_ops_per_ms / num_hogs as f64;
+
+    let p50_ops_per_ms = if num_hogs % 2 == 0 {
+        (ops_per_ms_only[num_hogs / 2 - 1] + ops_per_ms_only[num_hogs / 2]) / 2.0
+    } else {
+        ops_per_ms_only[num_hogs / 2]
+    };
+
+    let ops_per_ms_skew = max_ops_per_ms - min_ops_per_ms;
+    let ops_per_ms_skew_pct = if max_ops_per_ms > 0.0 {
+        (ops_per_ms_skew / max_ops_per_ms) * 100.0
     } else {
         0.0
     };
@@ -410,13 +462,18 @@ fn irq_disruption_targeted() -> Result<()> {
 
     // Print detailed results
     eprintln!("\n=== Per-CPU Results ===");
-    eprintln!("{:>6} {:>20} {:>20}", "CPU", "bogo_ops", "scheduled_ns");
+    eprintln!("{:>6} {:>20} {:>20} {:>20}", "CPU", "bogo_ops", "scheduled_ns", "bogo_ops/ms");
     for (idx, cpu) in hog_cpus.iter().enumerate() {
         let marker = if cpu.id() == VICTIM_CPU { " <-- VICTIM" } else { "" };
-        eprintln!("{:>6} {:>20} {:>20}{}",
+        let ops_per_ms = bogo_ops_per_ms.iter()
+            .find(|(id, _)| *id == cpu.id())
+            .map(|(_, rate)| *rate)
+            .unwrap_or(0.0);
+        eprintln!("{:>6} {:>20} {:>20} {:>20.2}{}",
                   cpu.id(),
                   bogo_ops_counters[idx].load(Ordering::Acquire),
                   scheduled_ns_results[idx],
+                  ops_per_ms,
                   marker);
     }
 
@@ -425,7 +482,21 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("Avg:       {:>20}", avg_bogo_ops);
     eprintln!("P50:       {:>20}", p50_bogo_ops);
     eprintln!("Max:       {:>20}", max_bogo_ops);
-    eprintln!("Max Skew:  {:>20} ({:.2}%)", max_skew, skew_pct);
+    eprintln!("Max Skew:  {:>20} ({:.2}%)", bogo_ops_skew, bogo_ops_skew_pct);
+
+    eprintln!("\n=== Scheduled Time (ns) Statistics ===");
+    eprintln!("Min:       {:>20}", min_scheduled_ns);
+    eprintln!("Avg:       {:>20}", avg_scheduled_ns);
+    eprintln!("P50:       {:>20}", p50_scheduled_ns);
+    eprintln!("Max:       {:>20}", max_scheduled_ns);
+    eprintln!("Max Skew:  {:>20} ({:.2}%)", scheduled_ns_skew, scheduled_ns_skew_pct);
+
+    eprintln!("\n=== Bogo Ops/ms Statistics ===");
+    eprintln!("Min:       {:>20.2}", min_ops_per_ms);
+    eprintln!("Avg:       {:>20.2}", avg_ops_per_ms);
+    eprintln!("P50:       {:>20.2}", p50_ops_per_ms);
+    eprintln!("Max:       {:>20.2}", max_ops_per_ms);
+    eprintln!("Max Skew:  {:>20.2} ({:.2}%)", ops_per_ms_skew, ops_per_ms_skew_pct);
 
     // Assert that the victim CPU has the minimum bogo_ops
     if *min_cpu != VICTIM_CPU {
