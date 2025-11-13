@@ -607,7 +607,7 @@ impl ActualizedCGroupTree {
             let child = Child::run(
                 move || {
                     // Just run the CPU hog - parent will add us to cgroup
-                    spinner_utilization::cpu_hog_workload(duration, start_signal_clone, scheduled_ns_out);
+                    spinner_utilization::cpu_hog_workload(duration, start_signal_clone, scheduled_ns_out, None);
                     Ok(())
                 },
                 None,

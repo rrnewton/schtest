@@ -268,6 +268,27 @@ fn compute_results(
             let mut seg_start = start_cycle;
             let mut seg_cycles = end_cycle - start_cycle;
 
+            // Skip windows that end before this segment starts
+            while cur_win_end <= seg_start {
+                // Finalize current window even if empty
+                if cur_win_cycles > 0 {
+                    windows.push(cur_win_cycles);
+                    let start_time_secs = (cur_win_start - first_cycle) as f64 / tsc_hz as f64;
+                    window_stats.push(InternalWindowStats {
+                        start_time_secs,
+                        slices: cur_win_slices,
+                        max_gap_cycles: cur_win_max_gap_cycles,
+                        cycles: cur_win_cycles,
+                    });
+                }
+                // Move to next window
+                cur_win_start = cur_win_end;
+                cur_win_end += window_cycles;
+                cur_win_cycles = 0;
+                cur_win_slices = 0;
+                cur_win_max_gap_cycles = 0;
+            }
+
             // Handle case where slice spans multiple windows
             while seg_start + seg_cycles > cur_win_end {
                 let win_cycles = cur_win_end - seg_start;
@@ -440,16 +461,18 @@ fn compute_results(
 ///
 /// This function waits for a start signal, then runs a CPU-intensive spinner
 /// for the specified duration, measuring the actual time scheduled via TSC.
-/// The scheduled time (in nanoseconds) is written to shared memory.
+/// The scheduled time (in nanoseconds) and bogo_ops are written to shared memory.
 ///
 /// # Arguments
 /// * `duration` - How long to run the spinner
 /// * `start_signal` - Shared atomic flag; spins until this becomes non-zero
 /// * `scheduled_ns_out` - Shared atomic where the scheduled time (ns) will be written
+/// * `bogo_ops_out` - Optional shared atomic where the bogo ops count will be written
 pub fn cpu_hog_workload(
     duration: Duration,
     start_signal: SharedBox<AtomicU32>,
     scheduled_ns_out: SharedBox<AtomicU64>,
+    bogo_ops_out: Option<SharedBox<AtomicU64>>,
 ) {
     // Get TSC frequency (non-verbose)
     let tsc_hz = get_tsc_hz(false);
@@ -464,4 +487,9 @@ pub fn cpu_hog_workload(
 
     // Write scheduled time (in nanoseconds) to shared memory
     scheduled_ns_out.store(results.time_scheduled_ns, Ordering::Release);
+
+    // Write bogo_ops if output location provided
+    if let Some(bogo_ops) = bogo_ops_out {
+        bogo_ops.store(results.bogo_ops, Ordering::Release);
+    }
 }
