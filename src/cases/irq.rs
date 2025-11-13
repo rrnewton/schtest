@@ -13,8 +13,47 @@ use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
-/// Handle for an IPI disruption strategy (waker + receiver threads)
-struct IpiDisruptionHandle {
+/// Different methods for generating IRQ load on the victim CPU
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IrqDisruptionMode {
+    /// Use futex_wait/futex_wake to generate cross-core IPI wakeups
+    Futex,
+    /// Use perf_event_open to generate PMI (Performance Monitoring Interrupt) sampling
+    Pmu,
+}
+
+
+/// Unified handle for any IRQ disruption strategy
+enum IrqDisruptionHandle {
+    Futex(FutexIpiDisruptionHandle),
+    Pmu(PmuIrqHandle),
+}
+
+impl IrqDisruptionHandle {
+    fn stop(self) -> Result<IrqDisruptionStats> {
+        match self {
+            IrqDisruptionHandle::Futex(handle) => handle.stop(),
+            IrqDisruptionHandle::Pmu(handle) => {
+                let _ = handle.stop()?;
+                Ok(IrqDisruptionStats::Pmu)
+            }
+        }
+    }
+}
+
+/// Statistics from IRQ disruption
+enum IrqDisruptionStats {
+    Futex {
+        wakeup_count: u64,
+        futex_wait_calls: u64,
+        futex_wait_blocks: u64,
+        futex_wait_eagain: u64,
+    },
+    Pmu,
+}
+
+/// Handle for futex-based IPI disruption strategy
+struct FutexIpiDisruptionHandle {
     waker_child: Child,
     receiver_child: Child,
     stop_signal: SharedBox<AtomicU32>,
@@ -25,15 +64,15 @@ struct IpiDisruptionHandle {
     futex_wait_eagain: SharedBox<AtomicU64>,
 }
 
-impl IpiDisruptionHandle {
+impl FutexIpiDisruptionHandle {
     /// Stop the IPI disruption and return stats
-    fn stop(self) -> Result<IpiDisruptionStats> {
+    fn stop(self) -> Result<IrqDisruptionStats> {
         self.stop_signal.store(1, Ordering::Release);
         std::thread::sleep(Duration::from_millis(100));
         drop(self.waker_child);
         drop(self.receiver_child);
 
-        Ok(IpiDisruptionStats {
+        Ok(IrqDisruptionStats::Futex {
             wakeup_count: self.wakeup_count.load(Ordering::Acquire),
             futex_wait_calls: self.futex_wait_calls.load(Ordering::Acquire),
             futex_wait_blocks: self.futex_wait_blocks.load(Ordering::Acquire),
@@ -42,26 +81,17 @@ impl IpiDisruptionHandle {
     }
 }
 
-/// Statistics from IPI disruption
-struct IpiDisruptionStats {
-    wakeup_count: u64,
-    futex_wait_calls: u64,
-    futex_wait_blocks: u64,
-    futex_wait_eagain: u64,
-}
-
 /// Launch futex-based IPI disruption (waker on waker_cpu, receiver on victim_cpu)
 ///
 /// The waker sends futex_wake() at irq_hz frequency to wake the receiver.
 /// Each futex_wake() should generate a cross-core IPI to wake the blocked receiver.
-#[allow(dead_code)]
 fn launch_futex_ipi_disruption(
     allocator: std::sync::Arc<BumpAllocator>,
     victim_cpu: &crate::util::system::Hyperthread,
     waker_cpu: &crate::util::system::Hyperthread,
     start_signal: SharedBox<AtomicU32>,
     irq_hz: u64,
-) -> Result<IpiDisruptionHandle> {
+) -> Result<FutexIpiDisruptionHandle> {
     let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
     let futex_word = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
     let wakeup_count = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
@@ -222,7 +252,7 @@ fn launch_futex_ipi_disruption(
         }
     });
 
-    Ok(IpiDisruptionHandle {
+    Ok(FutexIpiDisruptionHandle {
         waker_child,
         receiver_child,
         stop_signal,
@@ -428,8 +458,10 @@ fn launch_cgroup_hog(
 fn irq_disruption_targeted() -> Result<()> {
     const CPU_1: i32 = 1;
     const CPU_2: i32 = 2;
+    const WAKER_CPU: i32 = 0; // Only used for Futex mode
     const CPU_MAX_PERCENT: f64 = 50.0;
     const IRQ_HZ: u64 = 100 * 1000;
+    const DISRUPTION_MODE: IrqDisruptionMode = IrqDisruptionMode::Futex;
 
     let system = System::load()?;
 
@@ -444,7 +476,14 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("Found {} logical CPUs", all_cpus.len());
     eprintln!("Testing IRQ disruption impact on cpu.max fairness:");
     eprintln!("  CPU {} and CPU {} both limited to {}%", CPU_1, CPU_2, CPU_MAX_PERCENT);
-    eprintln!("  PMU sampling on CPU {} at {} Hz (PMI interrupts)", CPU_1, IRQ_HZ);
+    match DISRUPTION_MODE {
+        IrqDisruptionMode::Futex => {
+            eprintln!("  Futex-based IPI disruption: Waker on CPU {} -> Receiver on CPU {} at {} Hz", WAKER_CPU, CPU_1, IRQ_HZ);
+        }
+        IrqDisruptionMode::Pmu => {
+            eprintln!("  PMU sampling on CPU {} at {} Hz (PMI interrupts)", CPU_1, IRQ_HZ);
+        }
+    }
 
     // Find the CPUs
     let cpu_1_ht = all_cpus.iter()
@@ -455,6 +494,11 @@ fn irq_disruption_targeted() -> Result<()> {
     let cpu_2_ht = all_cpus.iter()
         .find(|ht| ht.id() == CPU_2)
         .ok_or_else(|| anyhow::anyhow!("CPU {} not found", CPU_2))?
+        .clone();
+
+    let waker_ht = all_cpus.iter()
+        .find(|ht| ht.id() == WAKER_CPU)
+        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", WAKER_CPU))?
         .clone();
 
     // Create shared memory for start signal and counters
@@ -489,15 +533,31 @@ fn irq_disruption_targeted() -> Result<()> {
         .build(hierarchies::auto())
         .context("Failed to create cgroup for CPU 2")?;
 
-    // Launch PMU-based IRQ disruption
-    eprintln!("\nLaunching PMU-based IRQ disruption...");
-    eprintln!("  PMU sampling on CPU {} at {} Hz", CPU_1, IRQ_HZ);
-    let irq_handle = launch_pmu_irq_disruption(
-        allocator.clone(),
-        &cpu_1_ht,
-        start_signal.clone(),
-        IRQ_HZ,
-    )?;
+    // Launch IRQ disruption based on selected mode
+    eprintln!("\nLaunching IRQ disruption...");
+    let irq_handle = match DISRUPTION_MODE {
+        IrqDisruptionMode::Futex => {
+            eprintln!("  Futex mode: Receiver on CPU {}, Waker on CPU {} at {} Hz", CPU_1, WAKER_CPU, IRQ_HZ);
+            let handle = launch_futex_ipi_disruption(
+                allocator.clone(),
+                &cpu_1_ht,
+                &waker_ht,
+                start_signal.clone(),
+                IRQ_HZ,
+            )?;
+            IrqDisruptionHandle::Futex(handle)
+        }
+        IrqDisruptionMode::Pmu => {
+            eprintln!("  PMU mode: Sampling on CPU {} at {} Hz", CPU_1, IRQ_HZ);
+            let handle = launch_pmu_irq_disruption(
+                allocator.clone(),
+                &cpu_1_ht,
+                start_signal.clone(),
+                IRQ_HZ,
+            )?;
+            IrqDisruptionHandle::Pmu(handle)
+        }
+    };
 
     let hog_duration = Duration::from_secs(3);
     eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
@@ -541,12 +601,37 @@ fn irq_disruption_targeted() -> Result<()> {
     }
     eprintln!("Both hogs completed successfully");
 
-    // Stop PMU disruption
-    eprintln!("Stopping PMU disruption...");
-    let _ = irq_handle.stop()?;
-    eprintln!("\n=== PMU Disruption Stats ===");
-    eprintln!("PMU sampling configured at {} Hz on CPU {}", IRQ_HZ, CPU_1);
-    eprintln!("(PMIs delivered as NMI-like interrupts throughout test)");
+    // Stop IRQ disruption
+    eprintln!("Stopping IRQ disruption...");
+    let stats = irq_handle.stop()?;
+
+    // Report stats based on mode
+    match stats {
+        IrqDisruptionStats::Futex {
+            wakeup_count,
+            futex_wait_calls,
+            futex_wait_blocks,
+            futex_wait_eagain,
+        } => {
+            eprintln!("\n=== Futex IPI Disruption Stats ===");
+            eprintln!("Waker sent {} wakeups total", wakeup_count);
+            eprintln!("Receiver futex_wait calls:  {}", futex_wait_calls);
+            eprintln!("  Actual blocks:             {}", futex_wait_blocks);
+            eprintln!("  EAGAIN returns:            {}", futex_wait_eagain);
+
+            let block_pct = if futex_wait_calls > 0 {
+                (futex_wait_blocks as f64 / futex_wait_calls as f64) * 100.0
+            } else {
+                0.0
+            };
+            eprintln!("  Block rate:                {:.2}%", block_pct);
+        }
+        IrqDisruptionStats::Pmu => {
+            eprintln!("\n=== PMU Disruption Stats ===");
+            eprintln!("PMU sampling configured at {} Hz on CPU {}", IRQ_HZ, CPU_1);
+            eprintln!("(PMIs delivered as NMI-like interrupts throughout test)");
+        }
+    }
 
     // Clean up cgroups
     drop(cgroup_cpu1);
