@@ -11,162 +11,26 @@ use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
-/// Test that creates one CPU hog per logical CPU to measure fairness.
+/// Test with optional targeted IRQ disruption on a specific CPU.
 ///
-/// This test pins one CPU hog to each logical CPU in the system, starts them
-/// simultaneously, and measures the skew in work done (bogo_ops) to detect
-/// unfairness that could be caused by IRQ load or other factors.
-fn irq_disruption() -> Result<()> {
-    let system = System::load()?;
-
-    // Collect all hyperthreads (logical CPUs)
-    let mut all_cpus = Vec::new();
-    for core in system.cores() {
-        for ht in core.hyperthreads() {
-            all_cpus.push(ht.clone());
-        }
-    }
-
-    let num_cpus = all_cpus.len();
-    eprintln!("Found {} logical CPUs", num_cpus);
-
-    if num_cpus == 0 {
-        return Err(anyhow::anyhow!("No CPUs found"));
-    }
-
-    // Create shared memory for start signal and counters
-    let allocator = BumpAllocator::new("irq_test", 1024 * 1024)?;
-    let start_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-
-    // Allocate bogo_ops counters (one per CPU)
-    let mut bogo_ops_counters = Vec::new();
-    let mut scheduled_ns_counters = Vec::new();
-    for _ in 0..num_cpus {
-        bogo_ops_counters.push(SharedBox::new(allocator.clone(), AtomicU64::new(0))?);
-        scheduled_ns_counters.push(SharedBox::new(allocator.clone(), AtomicU64::new(0))?);
-    }
-
-    // Launch CPU hogs, one pinned to each logical CPU
-    let hog_duration = Duration::from_secs(3);
-    eprintln!("\nLaunching {} CPU hogs (one per logical CPU) for {:?}...",
-              num_cpus, hog_duration);
-
-    let mut children = Vec::new();
-    for (cpu_idx, cpu) in all_cpus.iter().enumerate() {
-        let cpu_mask = CPUMask::new(cpu);
-        let start_signal_clone = start_signal.clone();
-        let bogo_ops_out = bogo_ops_counters[cpu_idx].clone();
-        let scheduled_ns_out = scheduled_ns_counters[cpu_idx].clone();
-
-        let child = Child::run(
-            move || {
-                // Pin to the specific CPU and run the hog
-                cpu_mask.run(|| {
-                    spinner_utilization::cpu_hog_workload(
-                        hog_duration,
-                        start_signal_clone,
-                        scheduled_ns_out,
-                        Some(bogo_ops_out),
-                    );
-                })?;
-                Ok(())
-            },
-            None,
-        )?;
-
-        children.push((cpu.id(), child));
-    }
-
-    // Give hogs a moment to initialize
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Signal all hogs to start simultaneously
-    eprintln!("Signaling all hogs to START");
-    start_signal.store(1, Ordering::Release);
-
-    // Wait for all hogs to complete
-    eprintln!("Waiting for hogs to complete...");
-    for (cpu_id, mut child) in children {
-        if let Some(result) = child.wait(true, false) {
-            result.map_err(|e| anyhow::anyhow!("Hog on CPU {} failed: {}", cpu_id, e))?;
-        }
-    }
-    eprintln!("All hogs completed successfully");
-
-    // Collect results
-    let mut bogo_ops_results: Vec<u64> = bogo_ops_counters
-        .iter()
-        .map(|counter| counter.load(Ordering::Acquire))
-        .collect();
-
-    let scheduled_ns_results: Vec<u64> = scheduled_ns_counters
-        .iter()
-        .map(|counter| counter.load(Ordering::Acquire))
-        .collect();
-
-    // Calculate statistics
-    if bogo_ops_results.is_empty() {
-        return Err(anyhow::anyhow!("No results collected"));
-    }
-
-    let min_bogo_ops = *bogo_ops_results.iter().min().unwrap();
-    let max_bogo_ops = *bogo_ops_results.iter().max().unwrap();
-    let sum_bogo_ops: u64 = bogo_ops_results.iter().sum();
-    let avg_bogo_ops = sum_bogo_ops / num_cpus as u64;
-
-    // Calculate p50 (median)
-    bogo_ops_results.sort_unstable();
-    let p50_bogo_ops = if num_cpus % 2 == 0 {
-        (bogo_ops_results[num_cpus / 2 - 1] + bogo_ops_results[num_cpus / 2]) / 2
-    } else {
-        bogo_ops_results[num_cpus / 2]
-    };
-
-    // Calculate maximum skew (difference between min and max)
-    let max_skew = max_bogo_ops - min_bogo_ops;
-    let skew_pct = if max_bogo_ops > 0 {
-        (max_skew as f64 / max_bogo_ops as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    // Print detailed results
-    eprintln!("\n=== Per-CPU Results ===");
-    eprintln!("{:>6} {:>20} {:>20}", "CPU", "bogo_ops", "scheduled_ns");
-    for (idx, cpu) in all_cpus.iter().enumerate() {
-        eprintln!("{:>6} {:>20} {:>20}",
-                  cpu.id(),
-                  bogo_ops_counters[idx].load(Ordering::Acquire),
-                  scheduled_ns_results[idx]);
-    }
-
-    eprintln!("\n=== Bogo Ops Statistics ===");
-    eprintln!("Min:       {:>20}", min_bogo_ops);
-    eprintln!("Avg:       {:>20}", avg_bogo_ops);
-    eprintln!("P50:       {:>20}", p50_bogo_ops);
-    eprintln!("Max:       {:>20}", max_bogo_ops);
-    eprintln!("Max Skew:  {:>20} ({:.2}%)", max_skew, skew_pct);
-
-    Ok(())
-}
-
-test!("irq_disruption", irq_disruption);
-
-/// Test with targeted IRQ disruption on a specific CPU.
+/// When PERFORM_IRQ_DISRUPTION is true:
+/// - Creates CPU hogs on all logical CPUs except CPU 0
+/// - Waker thread on CPU 0 sends high-frequency wakeups to receiver on victim CPU
+/// - This simulates heavy IRQ load on the victim CPU
 ///
-/// This test creates CPU hogs on all logical CPUs except CPU 0, and adds
-/// a waker thread on CPU 0 that sends high-frequency wakeups to a receiver
-/// thread on the victim CPU. This simulates heavy IRQ load on that CPU.
+/// When PERFORM_IRQ_DISRUPTION is false:
+/// - Creates CPU hogs on all logical CPUs (baseline fairness test)
 ///
 /// # Parameters
-/// * Victim CPU: 1 (configurable via const)
-/// * Waker CPU: 0 (runs the waker thread)
-/// * IRQ rate: 10000 Hz (configurable via const)
+/// * PERFORM_IRQ_DISRUPTION: Toggle IRQ disruption on/off (default: true)
+/// * VICTIM_CPU: Which CPU to target with IRQ disruption (default: 1)
+/// * WAKER_CPU: CPU that runs the waker thread (default: 0)
+/// * IRQ_HZ: Wakeup requests per second (default: 10000)
 fn irq_disruption_targeted() -> Result<()> {
+    const PERFORM_IRQ_DISRUPTION: bool = true;
     const VICTIM_CPU: i32 = 1;
     const WAKER_CPU: i32 = 0;
     const IRQ_HZ: u64 = 10000;
-    const PERFORM_IRQ_DISRUPTION: bool = true;
 
     let system = System::load()?;
 
@@ -180,35 +44,30 @@ fn irq_disruption_targeted() -> Result<()> {
 
     let num_cpus = all_cpus.len();
     eprintln!("Found {} logical CPUs", num_cpus);
-    eprintln!("Waker CPU: {}, Victim CPU: {}, IRQ rate: {} Hz", WAKER_CPU, VICTIM_CPU, IRQ_HZ);
-
-    if num_cpus < 2 {
-        return Err(anyhow::anyhow!("Need at least 2 CPUs for this test"));
+    if PERFORM_IRQ_DISRUPTION {
+        eprintln!("IRQ Disruption: ENABLED - Waker CPU: {}, Victim CPU: {}, IRQ rate: {} Hz",
+                  WAKER_CPU, VICTIM_CPU, IRQ_HZ);
+    } else {
+        eprintln!("IRQ Disruption: DISABLED - Running baseline fairness test");
     }
 
-    // Find victim and waker CPUs
-    let victim_hyperthread = all_cpus.iter()
-        .find(|ht| ht.id() == VICTIM_CPU)
-        .ok_or_else(|| anyhow::anyhow!("Victim CPU {} not found", VICTIM_CPU))?
-        .clone();
-
-    let waker_hyperthread = all_cpus.iter()
-        .find(|ht| ht.id() == WAKER_CPU)
-        .ok_or_else(|| anyhow::anyhow!("Waker CPU {} not found", WAKER_CPU))?
-        .clone();
+    if PERFORM_IRQ_DISRUPTION && num_cpus < 2 {
+        return Err(anyhow::anyhow!("Need at least 2 CPUs for IRQ disruption test"));
+    }
 
     // Create shared memory for start signal and counters
     let allocator = BumpAllocator::new("irq_test", 2 * 1024 * 1024)?;
     let start_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-    let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-    let wakeup_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-    let wakeup_count = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
 
-    // Filter CPUs for hogs: exclude CPU 0 (waker)
-    let hog_cpus: Vec<_> = all_cpus.iter()
-        .filter(|ht| ht.id() != WAKER_CPU)
-        .cloned()
-        .collect();
+    // Filter CPUs for hogs: exclude CPU 0 (waker) only if performing IRQ disruption
+    let hog_cpus: Vec<_> = if PERFORM_IRQ_DISRUPTION {
+        all_cpus.iter()
+            .filter(|ht| ht.id() != WAKER_CPU)
+            .cloned()
+            .collect()
+    } else {
+        all_cpus.clone()
+    };
 
     let num_hogs = hog_cpus.len();
 
@@ -220,89 +79,111 @@ fn irq_disruption_targeted() -> Result<()> {
         scheduled_ns_counters.push(SharedBox::new(allocator.clone(), AtomicU64::new(0))?);
     }
 
-    // Launch receiver thread on victim CPU
-    eprintln!("\nLaunching receiver thread on CPU {}...", VICTIM_CPU);
-    let receiver_mask = CPUMask::new(&victim_hyperthread);
-    let receiver_wakeup_signal = wakeup_signal.clone();
-    let receiver_stop_signal = stop_signal.clone();
+    // Optionally launch IRQ disruption threads
+    let (receiver_child, waker_child, stop_signal, wakeup_count) = if PERFORM_IRQ_DISRUPTION {
+        // Find victim and waker CPUs
+        let victim_hyperthread = all_cpus.iter()
+            .find(|ht| ht.id() == VICTIM_CPU)
+            .ok_or_else(|| anyhow::anyhow!("Victim CPU {} not found", VICTIM_CPU))?
+            .clone();
 
-    let receiver_child = Child::run(
-        move || {
-            receiver_mask.run(|| {
-                // Wait for wakeups and immediately go back to sleep
-                loop {
-                    // Wait for wakeup signal
-                    while receiver_wakeup_signal.load(Ordering::Acquire) == 0 {
+        let waker_hyperthread = all_cpus.iter()
+            .find(|ht| ht.id() == WAKER_CPU)
+            .ok_or_else(|| anyhow::anyhow!("Waker CPU {} not found", WAKER_CPU))?
+            .clone();
+
+        let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+        let wakeup_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+        let wakeup_count = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+
+        // Launch receiver thread on victim CPU
+        eprintln!("\nLaunching receiver thread on CPU {}...", VICTIM_CPU);
+        let receiver_mask = CPUMask::new(&victim_hyperthread);
+        let receiver_wakeup_signal = wakeup_signal.clone();
+        let receiver_stop_signal = stop_signal.clone();
+
+        let receiver_child = Child::run(
+            move || {
+                receiver_mask.run(|| {
+                    // Wait for wakeups and immediately go back to sleep
+                    loop {
+                        // Wait for wakeup signal
+                        while receiver_wakeup_signal.load(Ordering::Acquire) == 0 {
+                            std::hint::spin_loop();
+                        }
+
+                        // Clear the signal
+                        receiver_wakeup_signal.store(0, Ordering::Release);
+
+                        // Check if we should stop
+                        if receiver_stop_signal.load(Ordering::Acquire) != 0 {
+                            break;
+                        }
+                    }
+                })?;
+                Ok(())
+            },
+            None,
+        )?;
+
+        // Launch waker thread on CPU 0
+        eprintln!("Launching waker thread on CPU {} at {} Hz...", WAKER_CPU, IRQ_HZ);
+        let waker_mask = CPUMask::new(&waker_hyperthread);
+        let waker_start_signal = start_signal.clone();
+        let waker_stop_signal = stop_signal.clone();
+        let waker_wakeup_signal = wakeup_signal.clone();
+        let waker_count = wakeup_count.clone();
+
+        let waker_child = Child::run(
+            move || {
+                waker_mask.run(|| {
+                    use std::time::Instant;
+
+                    // Wait for start signal
+                    while waker_start_signal.load(Ordering::Acquire) == 0 {
                         std::hint::spin_loop();
                     }
 
-                    // Clear the signal
-                    receiver_wakeup_signal.store(0, Ordering::Release);
+                    let start_time = Instant::now();
+                    let target_interval = Duration::from_nanos(1_000_000_000 / IRQ_HZ);
+                    let mut wakeups_sent = 0u64;
 
-                    // Check if we should stop
-                    if receiver_stop_signal.load(Ordering::Acquire) != 0 {
-                        break;
-                    }
-                }
-            })?;
-            Ok(())
-        },
-        None,
-    )?;
+                    loop {
+                        // Check if we should stop
+                        if waker_stop_signal.load(Ordering::Acquire) != 0 {
+                            break;
+                        }
 
-    // Launch waker thread on CPU 0
-    eprintln!("Launching waker thread on CPU {} at {} Hz...", WAKER_CPU, IRQ_HZ);
-    let waker_mask = CPUMask::new(&waker_hyperthread);
-    let waker_start_signal = start_signal.clone();
-    let waker_stop_signal = stop_signal.clone();
-    let waker_wakeup_signal = wakeup_signal.clone();
-    let waker_count = wakeup_count.clone();
+                        // Calculate when the next wakeup should happen
+                        let target_time = start_time + target_interval * (wakeups_sent as u32);
 
-    let waker_child = Child::run(
-        move || {
-            waker_mask.run(|| {
-                use std::time::Instant;
+                        // Spin until it's time
+                        while Instant::now() < target_time {
+                            std::hint::spin_loop();
+                        }
 
-                // Wait for start signal
-                while waker_start_signal.load(Ordering::Acquire) == 0 {
-                    std::hint::spin_loop();
-                }
+                        // Send wakeup
+                        waker_wakeup_signal.store(1, Ordering::Release);
+                        wakeups_sent += 1;
 
-                let start_time = Instant::now();
-                let target_interval = Duration::from_nanos(1_000_000_000 / IRQ_HZ);
-                let mut wakeups_sent = 0u64;
-
-                loop {
-                    // Check if we should stop
-                    if waker_stop_signal.load(Ordering::Acquire) != 0 {
-                        break;
+                        // Record count every 1000 wakeups to avoid overhead
+                        if wakeups_sent % 1000 == 0 {
+                            waker_count.store(wakeups_sent, Ordering::Release);
+                        }
                     }
 
-                    // Calculate when the next wakeup should happen
-                    let target_time = start_time + target_interval * (wakeups_sent as u32);
+                    // Final count
+                    waker_count.store(wakeups_sent, Ordering::Release);
+                })?;
+                Ok(())
+            },
+            None,
+        )?;
 
-                    // Spin until it's time
-                    while Instant::now() < target_time {
-                        std::hint::spin_loop();
-                    }
-
-                    // Send wakeup
-                    waker_wakeup_signal.store(1, Ordering::Release);
-                    wakeups_sent += 1;
-
-                    // Record count every 1000 wakeups to avoid overhead
-                    if wakeups_sent % 1000 == 0 {
-                        waker_count.store(wakeups_sent, Ordering::Release);
-                    }
-                }
-
-                // Final count
-                waker_count.store(wakeups_sent, Ordering::Release);
-            })?;
-            Ok(())
-        },
-        None,
-    )?;
+        (Some(receiver_child), Some(waker_child), Some(stop_signal), Some(wakeup_count))
+    } else {
+        (None, None, None, None)
+    };
 
     // Launch CPU hogs (excluding CPU 0)
     let hog_duration = Duration::from_secs(3);
@@ -350,19 +231,25 @@ fn irq_disruption_targeted() -> Result<()> {
     }
     eprintln!("All hogs completed successfully");
 
-    // Stop waker and receiver
-    eprintln!("Stopping waker and receiver threads...");
-    stop_signal.store(1, Ordering::Release);
+    // Optionally stop waker and receiver
+    if PERFORM_IRQ_DISRUPTION {
+        eprintln!("Stopping waker and receiver threads...");
+        if let Some(ref stop) = stop_signal {
+            stop.store(1, Ordering::Release);
+        }
 
-    // Give them a moment to see the stop signal
-    std::thread::sleep(Duration::from_millis(100));
+        // Give them a moment to see the stop signal
+        std::thread::sleep(Duration::from_millis(100));
 
-    // Clean up threads
-    drop(waker_child);
-    drop(receiver_child);
+        // Clean up threads
+        drop(waker_child);
+        drop(receiver_child);
 
-    let total_wakeups = wakeup_count.load(Ordering::Acquire);
-    eprintln!("Waker sent {} wakeups total", total_wakeups);
+        if let Some(ref count) = wakeup_count {
+            let total_wakeups = count.load(Ordering::Acquire);
+            eprintln!("Waker sent {} wakeups total", total_wakeups);
+        }
+    }
 
     // Collect results
     let bogo_ops_results: Vec<(i32, u64)> = hog_cpus.iter()
@@ -464,7 +351,11 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("\n=== Per-CPU Results ===");
     eprintln!("{:>6} {:>20} {:>20} {:>20}", "CPU", "bogo_ops", "scheduled_ns", "bogo_ops/ms");
     for (idx, cpu) in hog_cpus.iter().enumerate() {
-        let marker = if cpu.id() == VICTIM_CPU { " <-- VICTIM" } else { "" };
+        let marker = if PERFORM_IRQ_DISRUPTION && cpu.id() == VICTIM_CPU {
+            " <-- VICTIM"
+        } else {
+            ""
+        };
         let ops_per_ms = bogo_ops_per_ms.iter()
             .find(|(id, _)| *id == cpu.id())
             .map(|(_, rate)| *rate)
@@ -498,16 +389,18 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("Max:       {:>20.2}", max_ops_per_ms);
     eprintln!("Max Skew:  {:>20.2} ({:.2}%)", ops_per_ms_skew, ops_per_ms_skew_pct);
 
-    // Assert that the victim CPU has the minimum bogo_ops
-    if *min_cpu != VICTIM_CPU {
-        return Err(anyhow::anyhow!(
-            "Expected victim CPU {} to have minimum bogo_ops, but CPU {} had minimum",
-            VICTIM_CPU,
-            min_cpu
-        ));
-    }
+    // Assert that the victim CPU has the minimum bogo_ops (only when IRQ disruption is enabled)
+    if PERFORM_IRQ_DISRUPTION {
+        if *min_cpu != VICTIM_CPU {
+            return Err(anyhow::anyhow!(
+                "Expected victim CPU {} to have minimum bogo_ops, but CPU {} had minimum",
+                VICTIM_CPU,
+                min_cpu
+            ));
+        }
 
-    eprintln!("\n✓ Assertion passed: Victim CPU {} has minimum bogo_ops", VICTIM_CPU);
+        eprintln!("\n✓ Assertion passed: Victim CPU {} has minimum bogo_ops", VICTIM_CPU);
+    }
 
     Ok(())
 }
