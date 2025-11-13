@@ -216,62 +216,26 @@ fn irq_disruption_targeted() -> Result<()> {
     eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
 
     // Launch hog on CPU 1 (victim - receives IPIs)
-    let cpu1_mask = CPUMask::new(&cpu_1_ht);
-    let start_signal_cpu1 = start_signal.clone();
-    let bogo_ops_out_cpu1 = bogo_ops_cpu1.clone();
-    let scheduled_ns_out_cpu1 = scheduled_ns_cpu1.clone();
-
-    let mut child_cpu1 = Child::run(
-        move || {
-            cpu1_mask.run(|| {
-                spinner_utilization::cpu_hog_workload(
-                    hog_duration,
-                    start_signal_cpu1,
-                    scheduled_ns_out_cpu1,
-                    Some(bogo_ops_out_cpu1),
-                );
-            })?;
-            Ok(())
-        },
-        None,
+    let mut child_cpu1 = launch_cgroup_hog(
+        CPU_1,
+        &cpu_1_ht,
+        "schtest_cpu_max_cpu1",
+        hog_duration,
+        start_signal.clone(),
+        bogo_ops_cpu1.clone(),
+        scheduled_ns_cpu1.clone(),
     )?;
-
-    // Add CPU 1 process to its cgroup
-    let pid1 = child_cpu1.pid().as_raw();
-    let procs_path1 = std::path::Path::new("/sys/fs/cgroup")
-        .join("schtest_cpu_max_cpu1")
-        .join("cgroup.procs");
-    std::fs::write(&procs_path1, pid1.to_string())
-        .context(format!("Failed to write PID {} to {:?}", pid1, procs_path1))?;
 
     // Launch hog on CPU 2 (control - no IPI load)
-    let cpu2_mask = CPUMask::new(&cpu_2_ht);
-    let start_signal_cpu2 = start_signal.clone();
-    let bogo_ops_out_cpu2 = bogo_ops_cpu2.clone();
-    let scheduled_ns_out_cpu2 = scheduled_ns_cpu2.clone();
-
-    let mut child_cpu2 = Child::run(
-        move || {
-            cpu2_mask.run(|| {
-                spinner_utilization::cpu_hog_workload(
-                    hog_duration,
-                    start_signal_cpu2,
-                    scheduled_ns_out_cpu2,
-                    Some(bogo_ops_out_cpu2),
-                );
-            })?;
-            Ok(())
-        },
-        None,
+    let mut child_cpu2 = launch_cgroup_hog(
+        CPU_2,
+        &cpu_2_ht,
+        "schtest_cpu_max_cpu2",
+        hog_duration,
+        start_signal.clone(),
+        bogo_ops_cpu2.clone(),
+        scheduled_ns_cpu2.clone(),
     )?;
-
-    // Add CPU 2 process to its cgroup
-    let pid2 = child_cpu2.pid().as_raw();
-    let procs_path2 = std::path::Path::new("/sys/fs/cgroup")
-        .join("schtest_cpu_max_cpu2")
-        .join("cgroup.procs");
-    std::fs::write(&procs_path2, pid2.to_string())
-        .context(format!("Failed to write PID {} to {:?}", pid2, procs_path2))?;
 
     // Give all threads a moment to initialize
     std::thread::sleep(Duration::from_millis(100));
@@ -440,6 +404,44 @@ fn irq_disruption_targeted() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Helper function to launch a CPU hog and add it to a cgroup
+fn launch_cgroup_hog(
+    _cpu_id: i32,
+    cpu_ht: &crate::util::system::Hyperthread,
+    cgroup_name: &str,
+    hog_duration: Duration,
+    start_signal: SharedBox<AtomicU32>,
+    bogo_ops_out: SharedBox<AtomicU64>,
+    scheduled_ns_out: SharedBox<AtomicU64>,
+) -> Result<Child> {
+    let cpu_mask = CPUMask::new(cpu_ht);
+
+    let mut child = Child::run(
+        move || {
+            cpu_mask.run(|| {
+                spinner_utilization::cpu_hog_workload(
+                    hog_duration,
+                    start_signal,
+                    scheduled_ns_out,
+                    Some(bogo_ops_out),
+                );
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
+
+    // Add process to its cgroup
+    let pid = child.pid().as_raw();
+    let procs_path = std::path::Path::new("/sys/fs/cgroup")
+        .join(cgroup_name)
+        .join("cgroup.procs");
+    std::fs::write(&procs_path, pid.to_string())
+        .context(format!("Failed to write PID {} to {:?}", pid, procs_path))?;
+
+    Ok(child)
 }
 
 test!("irq_disruption_targeted", irq_disruption_targeted);
