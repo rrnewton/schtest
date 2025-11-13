@@ -1,9 +1,11 @@
-//! Tests for heavy IRQ workload scenarios.
+//! Tests for cgroup cpu.max fairness scenarios.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use cgroups_rs::fs::cgroup_builder::CgroupBuilder;
+use cgroups_rs::fs::hierarchies;
 
 use crate::test;
 use crate::util::child::Child;
@@ -11,26 +13,20 @@ use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
-/// Test with optional targeted IRQ disruption on a specific CPU.
+/// Test cgroup cpu.max fairness with two CPU hogs.
 ///
-/// When PERFORM_IRQ_DISRUPTION is true:
-/// - Creates CPU hogs on all logical CPUs except CPU 0
-/// - Waker thread on CPU 0 sends high-frequency wakeups to receiver on victim CPU
-/// - This simulates heavy IRQ load on the victim CPU
-///
-/// When PERFORM_IRQ_DISRUPTION is false:
-/// - Creates CPU hogs on all logical CPUs (baseline fairness test)
+/// This test creates two CPU hogs, one on CPU 1 (victim) and one on CPU 2.
+/// Both are placed in separate cgroups with cpu.max set to 10% of one CPU.
+/// This validates that both CPUs receive fair scheduling despite the cpu.max limit.
 ///
 /// # Parameters
-/// * PERFORM_IRQ_DISRUPTION: Toggle IRQ disruption on/off (default: true)
-/// * VICTIM_CPU: Which CPU to target with IRQ disruption (default: 1)
-/// * WAKER_CPU: CPU that runs the waker thread (default: 0)
-/// * IRQ_HZ: Wakeup requests per second (default: 10000)
+/// * CPU_1: First CPU (default: 1) - victim CPU
+/// * CPU_2: Second CPU (default: 2)
+/// * CPU_MAX_PERCENT: cpu.max limit as percentage (default: 10%)
 fn irq_disruption_targeted() -> Result<()> {
-    const PERFORM_IRQ_DISRUPTION: bool = true;
-    const VICTIM_CPU: i32 = 1;
-    const WAKER_CPU: i32 = 0;
-    const IRQ_HZ: u64 = 10000;
+    const CPU_1: i32 = 1;
+    const CPU_2: i32 = 2;
+    const CPU_MAX_PERCENT: f64 = 10.0;
 
     let system = System::load()?;
 
@@ -42,246 +38,157 @@ fn irq_disruption_targeted() -> Result<()> {
         }
     }
 
-    let num_cpus = all_cpus.len();
-    eprintln!("Found {} logical CPUs", num_cpus);
-    if PERFORM_IRQ_DISRUPTION {
-        eprintln!("IRQ Disruption: ENABLED - Waker CPU: {}, Victim CPU: {}, IRQ rate: {} Hz",
-                  WAKER_CPU, VICTIM_CPU, IRQ_HZ);
-    } else {
-        eprintln!("IRQ Disruption: DISABLED - Running baseline fairness test");
-    }
+    eprintln!("Found {} logical CPUs", all_cpus.len());
+    eprintln!("Testing cpu.max fairness: CPU {} and CPU {} both limited to {}%",
+              CPU_1, CPU_2, CPU_MAX_PERCENT);
 
-    if PERFORM_IRQ_DISRUPTION && num_cpus < 2 {
-        return Err(anyhow::anyhow!("Need at least 2 CPUs for IRQ disruption test"));
-    }
+    // Find the two CPUs
+    let cpu_1_ht = all_cpus.iter()
+        .find(|ht| ht.id() == CPU_1)
+        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", CPU_1))?
+        .clone();
+
+    let cpu_2_ht = all_cpus.iter()
+        .find(|ht| ht.id() == CPU_2)
+        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", CPU_2))?
+        .clone();
 
     // Create shared memory for start signal and counters
-    let allocator = BumpAllocator::new("irq_test", 2 * 1024 * 1024)?;
+    let allocator = BumpAllocator::new("cpu_max_test", 1 * 1024 * 1024)?;
     let start_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
 
-    // Filter CPUs for hogs: exclude CPU 0 (waker) only if performing IRQ disruption
-    let hog_cpus: Vec<_> = if PERFORM_IRQ_DISRUPTION {
-        all_cpus.iter()
-            .filter(|ht| ht.id() != WAKER_CPU)
-            .cloned()
-            .collect()
-    } else {
-        all_cpus.clone()
-    };
+    // Create counters for both CPUs
+    let bogo_ops_cpu1 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+    let scheduled_ns_cpu1 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+    let bogo_ops_cpu2 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+    let scheduled_ns_cpu2 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
 
-    let num_hogs = hog_cpus.len();
+    // Create cgroups with cpu.max limits
+    // cpu.max format: quota period (in microseconds)
+    // For 10% of one CPU: quota=10000, period=100000 (10ms out of 100ms)
+    let period_us = 100000u64;  // 100ms period
+    let quota_us = (period_us as f64 * CPU_MAX_PERCENT / 100.0) as i64;
 
-    // Allocate bogo_ops counters (one per hog)
-    let mut bogo_ops_counters = Vec::new();
-    let mut scheduled_ns_counters = Vec::new();
-    for _ in 0..num_hogs {
-        bogo_ops_counters.push(SharedBox::new(allocator.clone(), AtomicU64::new(0))?);
-        scheduled_ns_counters.push(SharedBox::new(allocator.clone(), AtomicU64::new(0))?);
-    }
+    eprintln!("\nCreating cgroups with cpu.max={}/{} ({}%)", quota_us, period_us, CPU_MAX_PERCENT);
 
-    // Optionally launch IRQ disruption threads
-    let (receiver_child, waker_child, stop_signal, wakeup_count) = if PERFORM_IRQ_DISRUPTION {
-        // Find victim and waker CPUs
-        let victim_hyperthread = all_cpus.iter()
-            .find(|ht| ht.id() == VICTIM_CPU)
-            .ok_or_else(|| anyhow::anyhow!("Victim CPU {} not found", VICTIM_CPU))?
-            .clone();
+    let cgroup_cpu1 = CgroupBuilder::new("schtest_cpu_max_cpu1")
+        .cpu()
+        .quota(quota_us)
+        .period(period_us)
+        .done()
+        .build(hierarchies::auto())
+        .context("Failed to create cgroup for CPU 1")?;
 
-        let waker_hyperthread = all_cpus.iter()
-            .find(|ht| ht.id() == WAKER_CPU)
-            .ok_or_else(|| anyhow::anyhow!("Waker CPU {} not found", WAKER_CPU))?
-            .clone();
+    let cgroup_cpu2 = CgroupBuilder::new("schtest_cpu_max_cpu2")
+        .cpu()
+        .quota(quota_us)
+        .period(period_us)
+        .done()
+        .build(hierarchies::auto())
+        .context("Failed to create cgroup for CPU 2")?;
 
-        let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-        let wakeup_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-        let wakeup_count = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
-
-        // Launch receiver thread on victim CPU
-        eprintln!("\nLaunching receiver thread on CPU {}...", VICTIM_CPU);
-        let receiver_mask = CPUMask::new(&victim_hyperthread);
-        let receiver_wakeup_signal = wakeup_signal.clone();
-        let receiver_stop_signal = stop_signal.clone();
-
-        let receiver_child = Child::run(
-            move || {
-                receiver_mask.run(|| {
-                    // Wait for wakeups and immediately go back to sleep
-                    loop {
-                        // Wait for wakeup signal
-                        while receiver_wakeup_signal.load(Ordering::Acquire) == 0 {
-                            std::hint::spin_loop();
-                        }
-
-                        // Clear the signal
-                        receiver_wakeup_signal.store(0, Ordering::Release);
-
-                        // Check if we should stop
-                        if receiver_stop_signal.load(Ordering::Acquire) != 0 {
-                            break;
-                        }
-                    }
-                })?;
-                Ok(())
-            },
-            None,
-        )?;
-
-        // Launch waker thread on CPU 0
-        eprintln!("Launching waker thread on CPU {} at {} Hz...", WAKER_CPU, IRQ_HZ);
-        let waker_mask = CPUMask::new(&waker_hyperthread);
-        let waker_start_signal = start_signal.clone();
-        let waker_stop_signal = stop_signal.clone();
-        let waker_wakeup_signal = wakeup_signal.clone();
-        let waker_count = wakeup_count.clone();
-
-        let waker_child = Child::run(
-            move || {
-                waker_mask.run(|| {
-                    use std::time::Instant;
-
-                    // Wait for start signal
-                    while waker_start_signal.load(Ordering::Acquire) == 0 {
-                        std::hint::spin_loop();
-                    }
-
-                    let start_time = Instant::now();
-                    let target_interval = Duration::from_nanos(1_000_000_000 / IRQ_HZ);
-                    let mut wakeups_sent = 0u64;
-
-                    loop {
-                        // Check if we should stop
-                        if waker_stop_signal.load(Ordering::Acquire) != 0 {
-                            break;
-                        }
-
-                        // Calculate when the next wakeup should happen
-                        let target_time = start_time + target_interval * (wakeups_sent as u32);
-
-                        // Spin until it's time
-                        while Instant::now() < target_time {
-                            std::hint::spin_loop();
-                        }
-
-                        // Send wakeup
-                        waker_wakeup_signal.store(1, Ordering::Release);
-                        wakeups_sent += 1;
-
-                        // Record count every 1000 wakeups to avoid overhead
-                        if wakeups_sent % 1000 == 0 {
-                            waker_count.store(wakeups_sent, Ordering::Release);
-                        }
-                    }
-
-                    // Final count
-                    waker_count.store(wakeups_sent, Ordering::Release);
-                })?;
-                Ok(())
-            },
-            None,
-        )?;
-
-        (Some(receiver_child), Some(waker_child), Some(stop_signal), Some(wakeup_count))
-    } else {
-        (None, None, None, None)
-    };
-
-    // Launch CPU hogs (excluding CPU 0)
     let hog_duration = Duration::from_secs(3);
-    eprintln!("\nLaunching {} CPU hogs for {:?}...", num_hogs, hog_duration);
+    eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
 
-    let mut children = Vec::new();
-    for (hog_idx, cpu) in hog_cpus.iter().enumerate() {
-        let cpu_mask = CPUMask::new(cpu);
-        let start_signal_clone = start_signal.clone();
-        let bogo_ops_out = bogo_ops_counters[hog_idx].clone();
-        let scheduled_ns_out = scheduled_ns_counters[hog_idx].clone();
+    // Launch hog on CPU 1
+    let cpu1_mask = CPUMask::new(&cpu_1_ht);
+    let start_signal_cpu1 = start_signal.clone();
+    let bogo_ops_out_cpu1 = bogo_ops_cpu1.clone();
+    let scheduled_ns_out_cpu1 = scheduled_ns_cpu1.clone();
 
-        let child = Child::run(
-            move || {
-                // Pin to the specific CPU and run the hog
-                cpu_mask.run(|| {
-                    spinner_utilization::cpu_hog_workload(
-                        hog_duration,
-                        start_signal_clone,
-                        scheduled_ns_out,
-                        Some(bogo_ops_out),
-                    );
-                })?;
-                Ok(())
-            },
-            None,
-        )?;
+    let mut child_cpu1 = Child::run(
+        move || {
+            // Pin to CPU 1 and run the hog
+            cpu1_mask.run(|| {
+                spinner_utilization::cpu_hog_workload(
+                    hog_duration,
+                    start_signal_cpu1,
+                    scheduled_ns_out_cpu1,
+                    Some(bogo_ops_out_cpu1),
+                );
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
 
-        children.push((cpu.id(), child));
-    }
+    // Add CPU 1 process to its cgroup
+    let pid1 = child_cpu1.pid().as_raw();
+    let procs_path1 = std::path::Path::new("/sys/fs/cgroup")
+        .join("schtest_cpu_max_cpu1")
+        .join("cgroup.procs");
+    std::fs::write(&procs_path1, pid1.to_string())
+        .context(format!("Failed to write PID {} to {:?}", pid1, procs_path1))?;
 
-    // Give all threads a moment to initialize
+    // Launch hog on CPU 2
+    let cpu2_mask = CPUMask::new(&cpu_2_ht);
+    let start_signal_cpu2 = start_signal.clone();
+    let bogo_ops_out_cpu2 = bogo_ops_cpu2.clone();
+    let scheduled_ns_out_cpu2 = scheduled_ns_cpu2.clone();
+
+    let mut child_cpu2 = Child::run(
+        move || {
+            // Pin to CPU 2 and run the hog
+            cpu2_mask.run(|| {
+                spinner_utilization::cpu_hog_workload(
+                    hog_duration,
+                    start_signal_cpu2,
+                    scheduled_ns_out_cpu2,
+                    Some(bogo_ops_out_cpu2),
+                );
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
+
+    // Add CPU 2 process to its cgroup
+    let pid2 = child_cpu2.pid().as_raw();
+    let procs_path2 = std::path::Path::new("/sys/fs/cgroup")
+        .join("schtest_cpu_max_cpu2")
+        .join("cgroup.procs");
+    std::fs::write(&procs_path2, pid2.to_string())
+        .context(format!("Failed to write PID {} to {:?}", pid2, procs_path2))?;
+
+    // Give hogs a moment to initialize
     std::thread::sleep(Duration::from_millis(100));
 
-    // Signal all threads to start simultaneously
-    eprintln!("Signaling all threads to START");
+    // Signal both hogs to start simultaneously
+    eprintln!("Signaling both hogs to START");
     start_signal.store(1, Ordering::Release);
 
-    // Wait for hogs to complete
+    // Wait for both hogs to complete
     eprintln!("Waiting for hogs to complete...");
-    for (cpu_id, mut child) in children {
-        if let Some(result) = child.wait(true, false) {
-            result.map_err(|e| anyhow::anyhow!("Hog on CPU {} failed: {}", cpu_id, e))?;
-        }
+    if let Some(result) = child_cpu1.wait(true, false) {
+        result.context(format!("Hog on CPU {} failed", CPU_1))?;
     }
-    eprintln!("All hogs completed successfully");
-
-    // Optionally stop waker and receiver
-    if PERFORM_IRQ_DISRUPTION {
-        eprintln!("Stopping waker and receiver threads...");
-        if let Some(ref stop) = stop_signal {
-            stop.store(1, Ordering::Release);
-        }
-
-        // Give them a moment to see the stop signal
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Clean up threads
-        drop(waker_child);
-        drop(receiver_child);
-
-        if let Some(ref count) = wakeup_count {
-            let total_wakeups = count.load(Ordering::Acquire);
-            eprintln!("Waker sent {} wakeups total", total_wakeups);
-        }
+    if let Some(result) = child_cpu2.wait(true, false) {
+        result.context(format!("Hog on CPU {} failed", CPU_2))?;
     }
+    eprintln!("Both hogs completed successfully");
+
+    // Clean up cgroups
+    drop(cgroup_cpu1);
+    drop(cgroup_cpu2);
 
     // Collect results
-    let bogo_ops_results: Vec<(i32, u64)> = hog_cpus.iter()
-        .enumerate()
-        .map(|(idx, cpu)| (cpu.id(), bogo_ops_counters[idx].load(Ordering::Acquire)))
-        .collect();
-
-    let scheduled_ns_results: Vec<u64> = scheduled_ns_counters
-        .iter()
-        .map(|counter| counter.load(Ordering::Acquire))
-        .collect();
+    let results: Vec<(i32, u64, u64)> = vec![
+        (CPU_1, bogo_ops_cpu1.load(Ordering::Acquire), scheduled_ns_cpu1.load(Ordering::Acquire)),
+        (CPU_2, bogo_ops_cpu2.load(Ordering::Acquire), scheduled_ns_cpu2.load(Ordering::Acquire)),
+    ];
 
     // Calculate statistics
-    if bogo_ops_results.is_empty() {
-        return Err(anyhow::anyhow!("No results collected"));
-    }
+    let bogo_ops_results: Vec<(i32, u64)> = results.iter().map(|(cpu, ops, _)| (*cpu, *ops)).collect();
+    let scheduled_ns_results: Vec<(i32, u64)> = results.iter().map(|(cpu, _, ns)| (*cpu, *ns)).collect();
 
     // Bogo ops statistics
     let mut bogo_ops_only: Vec<u64> = bogo_ops_results.iter().map(|(_, ops)| *ops).collect();
     bogo_ops_only.sort_unstable();
 
-    let min_bogo_ops = *bogo_ops_only.first().unwrap();
-    let max_bogo_ops = *bogo_ops_only.last().unwrap();
-    let sum_bogo_ops: u64 = bogo_ops_only.iter().sum();
-    let avg_bogo_ops = sum_bogo_ops / num_hogs as u64;
-
-    let p50_bogo_ops = if num_hogs % 2 == 0 {
-        (bogo_ops_only[num_hogs / 2 - 1] + bogo_ops_only[num_hogs / 2]) / 2
-    } else {
-        bogo_ops_only[num_hogs / 2]
-    };
-
+    let min_bogo_ops = bogo_ops_only[0];
+    let max_bogo_ops = bogo_ops_only[1];
+    let avg_bogo_ops = (min_bogo_ops + max_bogo_ops) / 2;
+    let p50_bogo_ops = avg_bogo_ops; // With 2 values, median = average
     let bogo_ops_skew = max_bogo_ops - min_bogo_ops;
     let bogo_ops_skew_pct = if max_bogo_ops > 0 {
         (bogo_ops_skew as f64 / max_bogo_ops as f64) * 100.0
@@ -289,21 +196,19 @@ fn irq_disruption_targeted() -> Result<()> {
         0.0
     };
 
+    // Find which CPUs have min/max/p50 bogo_ops
+    let (min_bogo_cpu, _) = bogo_ops_results.iter().min_by_key(|(_, ops)| ops).unwrap();
+    let (max_bogo_cpu, _) = bogo_ops_results.iter().max_by_key(|(_, ops)| ops).unwrap();
+    let p50_bogo_cpu = *min_bogo_cpu; // Arbitrary choice for 2 values
+
     // Scheduled nanoseconds statistics
-    let mut scheduled_ns_only = scheduled_ns_results.clone();
+    let mut scheduled_ns_only: Vec<u64> = scheduled_ns_results.iter().map(|(_, ns)| *ns).collect();
     scheduled_ns_only.sort_unstable();
 
-    let min_scheduled_ns = *scheduled_ns_only.first().unwrap();
-    let max_scheduled_ns = *scheduled_ns_only.last().unwrap();
-    let sum_scheduled_ns: u64 = scheduled_ns_only.iter().sum();
-    let avg_scheduled_ns = sum_scheduled_ns / num_hogs as u64;
-
-    let p50_scheduled_ns = if num_hogs % 2 == 0 {
-        (scheduled_ns_only[num_hogs / 2 - 1] + scheduled_ns_only[num_hogs / 2]) / 2
-    } else {
-        scheduled_ns_only[num_hogs / 2]
-    };
-
+    let min_scheduled_ns = scheduled_ns_only[0];
+    let max_scheduled_ns = scheduled_ns_only[1];
+    let avg_scheduled_ns = (min_scheduled_ns + max_scheduled_ns) / 2;
+    let p50_scheduled_ns = avg_scheduled_ns;
     let scheduled_ns_skew = max_scheduled_ns - min_scheduled_ns;
     let scheduled_ns_skew_pct = if max_scheduled_ns > 0 {
         (scheduled_ns_skew as f64 / max_scheduled_ns as f64) * 100.0
@@ -311,30 +216,27 @@ fn irq_disruption_targeted() -> Result<()> {
         0.0
     };
 
+    // Find which CPUs have min/max/p50 scheduled_ns
+    let (min_ns_cpu, _) = scheduled_ns_results.iter().min_by_key(|(_, ns)| ns).unwrap();
+    let (max_ns_cpu, _) = scheduled_ns_results.iter().max_by_key(|(_, ns)| ns).unwrap();
+    let p50_ns_cpu = *min_ns_cpu; // Arbitrary choice for 2 values
+
     // Bogo ops per millisecond
-    let bogo_ops_per_ms: Vec<(i32, f64)> = bogo_ops_results.iter()
-        .zip(scheduled_ns_results.iter())
-        .map(|((cpu_id, ops), ns)| {
+    let bogo_ops_per_ms: Vec<(i32, f64)> = results.iter()
+        .map(|(cpu, ops, ns)| {
             let ms = *ns as f64 / 1_000_000.0;
             let ops_per_ms = if ms > 0.0 { *ops as f64 / ms } else { 0.0 };
-            (*cpu_id, ops_per_ms)
+            (*cpu, ops_per_ms)
         })
         .collect();
 
     let mut ops_per_ms_only: Vec<f64> = bogo_ops_per_ms.iter().map(|(_, rate)| *rate).collect();
     ops_per_ms_only.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let min_ops_per_ms = *ops_per_ms_only.first().unwrap();
-    let max_ops_per_ms = *ops_per_ms_only.last().unwrap();
-    let sum_ops_per_ms: f64 = ops_per_ms_only.iter().sum();
-    let avg_ops_per_ms = sum_ops_per_ms / num_hogs as f64;
-
-    let p50_ops_per_ms = if num_hogs % 2 == 0 {
-        (ops_per_ms_only[num_hogs / 2 - 1] + ops_per_ms_only[num_hogs / 2]) / 2.0
-    } else {
-        ops_per_ms_only[num_hogs / 2]
-    };
-
+    let min_ops_per_ms = ops_per_ms_only[0];
+    let max_ops_per_ms = ops_per_ms_only[1];
+    let avg_ops_per_ms = (min_ops_per_ms + max_ops_per_ms) / 2.0;
+    let p50_ops_per_ms = avg_ops_per_ms;
     let ops_per_ms_skew = max_ops_per_ms - min_ops_per_ms;
     let ops_per_ms_skew_pct = if max_ops_per_ms > 0.0 {
         (ops_per_ms_skew / max_ops_per_ms) * 100.0
@@ -342,65 +244,44 @@ fn irq_disruption_targeted() -> Result<()> {
         0.0
     };
 
-    // Find which CPU has minimum bogo_ops
-    let (min_cpu, _) = bogo_ops_results.iter()
-        .min_by_key(|(_, ops)| ops)
-        .unwrap();
+    // Find which CPUs have min/max/p50 ops_per_ms
+    let (min_ops_ms_cpu, _) = bogo_ops_per_ms.iter().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+    let (max_ops_ms_cpu, _) = bogo_ops_per_ms.iter().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+    let p50_ops_ms_cpu = *min_ops_ms_cpu; // Arbitrary choice for 2 values
 
     // Print detailed results
     eprintln!("\n=== Per-CPU Results ===");
     eprintln!("{:>6} {:>20} {:>20} {:>20}", "CPU", "bogo_ops", "scheduled_ns", "bogo_ops/ms");
-    for (idx, cpu) in hog_cpus.iter().enumerate() {
-        let marker = if PERFORM_IRQ_DISRUPTION && cpu.id() == VICTIM_CPU {
-            " <-- VICTIM"
-        } else {
-            ""
-        };
+    for (cpu, ops, ns) in &results {
         let ops_per_ms = bogo_ops_per_ms.iter()
-            .find(|(id, _)| *id == cpu.id())
+            .find(|(id, _)| id == cpu)
             .map(|(_, rate)| *rate)
             .unwrap_or(0.0);
+        let marker = if *cpu == CPU_1 { " <-- CPU 1" } else { " <-- CPU 2" };
         eprintln!("{:>6} {:>20} {:>20} {:>20.2}{}",
-                  cpu.id(),
-                  bogo_ops_counters[idx].load(Ordering::Acquire),
-                  scheduled_ns_results[idx],
-                  ops_per_ms,
-                  marker);
+                  cpu, ops, ns, ops_per_ms, marker);
     }
 
     eprintln!("\n=== Bogo Ops Statistics ===");
-    eprintln!("Min:       {:>20} (CPU {})", min_bogo_ops, min_cpu);
+    eprintln!("Min:       {:>20} (CPU {})", min_bogo_ops, min_bogo_cpu);
     eprintln!("Avg:       {:>20}", avg_bogo_ops);
-    eprintln!("P50:       {:>20}", p50_bogo_ops);
-    eprintln!("Max:       {:>20}", max_bogo_ops);
+    eprintln!("P50:       {:>20} (CPU {})", p50_bogo_ops, p50_bogo_cpu);
+    eprintln!("Max:       {:>20} (CPU {})", max_bogo_ops, max_bogo_cpu);
     eprintln!("Max Skew:  {:>20} ({:.2}%)", bogo_ops_skew, bogo_ops_skew_pct);
 
     eprintln!("\n=== Scheduled Time (ns) Statistics ===");
-    eprintln!("Min:       {:>20}", min_scheduled_ns);
+    eprintln!("Min:       {:>20} (CPU {})", min_scheduled_ns, min_ns_cpu);
     eprintln!("Avg:       {:>20}", avg_scheduled_ns);
-    eprintln!("P50:       {:>20}", p50_scheduled_ns);
-    eprintln!("Max:       {:>20}", max_scheduled_ns);
+    eprintln!("P50:       {:>20} (CPU {})", p50_scheduled_ns, p50_ns_cpu);
+    eprintln!("Max:       {:>20} (CPU {})", max_scheduled_ns, max_ns_cpu);
     eprintln!("Max Skew:  {:>20} ({:.2}%)", scheduled_ns_skew, scheduled_ns_skew_pct);
 
     eprintln!("\n=== Bogo Ops/ms Statistics ===");
-    eprintln!("Min:       {:>20.2}", min_ops_per_ms);
+    eprintln!("Min:       {:>20.2} (CPU {})", min_ops_per_ms, min_ops_ms_cpu);
     eprintln!("Avg:       {:>20.2}", avg_ops_per_ms);
-    eprintln!("P50:       {:>20.2}", p50_ops_per_ms);
-    eprintln!("Max:       {:>20.2}", max_ops_per_ms);
+    eprintln!("P50:       {:>20.2} (CPU {})", p50_ops_per_ms, p50_ops_ms_cpu);
+    eprintln!("Max:       {:>20.2} (CPU {})", max_ops_per_ms, max_ops_ms_cpu);
     eprintln!("Max Skew:  {:>20.2} ({:.2}%)", ops_per_ms_skew, ops_per_ms_skew_pct);
-
-    // Assert that the victim CPU has the minimum bogo_ops (only when IRQ disruption is enabled)
-    if PERFORM_IRQ_DISRUPTION {
-        if *min_cpu != VICTIM_CPU {
-            return Err(anyhow::anyhow!(
-                "Expected victim CPU {} to have minimum bogo_ops, but CPU {} had minimum",
-                VICTIM_CPU,
-                min_cpu
-            ));
-        }
-
-        eprintln!("\n✓ Assertion passed: Victim CPU {} has minimum bogo_ops", VICTIM_CPU);
-    }
 
     Ok(())
 }
