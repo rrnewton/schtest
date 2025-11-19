@@ -645,6 +645,47 @@ fn get_max_perf_sample_rate() -> Result<u64> {
         .context("Failed to parse perf_event_max_sample_rate")
 }
 
+/// Detect and report scheduler information
+fn log_scheduler_info() {
+    fn read_sysfs(path: &str) -> Option<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    eprintln!("\nScheduler Information:");
+
+    // Check if sched_ext is active by looking for /sys/kernel/sched_ext
+    let sched_ext_path = "/sys/kernel/sched_ext";
+    let sched_ext_active = std::path::Path::new(sched_ext_path).exists();
+
+    if sched_ext_active {
+        eprintln!("  sched_ext:                    ACTIVE");
+
+        // Try to read the current scheduler name
+        if let Some(scheduler) = read_sysfs("/sys/kernel/sched_ext/root/ops") {
+            eprintln!("  Current scheduler:            {}", scheduler);
+        } else if let Some(scheduler) = read_sysfs("/sys/kernel/sched_ext/state") {
+            eprintln!("  sched_ext state:              {}", scheduler);
+        }
+    } else {
+        eprintln!("  sched_ext:                    NOT ACTIVE");
+        eprintln!("  Scheduler:                    CFS (default)");
+    }
+
+    // Check scheduler features
+    if let Some(features) = read_sysfs("/sys/kernel/debug/sched/features") {
+        eprintln!(
+            "  Scheduler features:           {}",
+            if features.len() > 60 {
+                &features[..60]
+            } else {
+                &features
+            }
+        );
+    }
+}
+
 /// Log relevant perf sysctls to aid debugging PMU sampling behavior.
 fn log_perf_sysctls() {
     fn read_sysctl(path: &str) -> Option<String> {
@@ -919,7 +960,8 @@ fn irq_disruption_targeted() -> Result<()> {
         }
     }
 
-    // Log perf sysctls for visibility, especially relevant in PMU mode
+    // Log scheduler and perf information
+    log_scheduler_info();
     log_perf_sysctls();
 
     // Find the CPUs
@@ -1053,7 +1095,7 @@ fn irq_disruption_targeted() -> Result<()> {
         }
     };
 
-    let hog_duration = Duration::from_secs(3);
+    let hog_duration = Duration::from_secs(30);
     eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
 
     // Launch hog on CPU 1 (victim - receives IPIs)
