@@ -44,7 +44,7 @@ pub struct BenchmarkResults {
     pub bogo_ops: u64,
     pub total_tsc_ticks: u64,
     pub per_window_stats: Vec<WindowStat>,
-    pub percentiles: Percentiles,
+    pub utilization_pcts: Percentiles,
 }
 
 /// Read the current cycle count using rdtsc
@@ -438,7 +438,7 @@ fn compute_results(
             bogo_ops: count,
             total_tsc_ticks: total_cycles,
             per_window_stats: json_window_stats,
-            percentiles: percentile_values,
+            utilization_pcts: percentile_values,
         }
     } else {
         // No slices, empty results
@@ -448,7 +448,7 @@ fn compute_results(
             bogo_ops: count,
             total_tsc_ticks: total_cycles,
             per_window_stats: vec![],
-            percentiles: Percentiles {
+            utilization_pcts: Percentiles {
                 p01: 0.0,
                 p25: 0.0,
                 p50: 0.0,
