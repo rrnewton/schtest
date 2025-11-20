@@ -650,11 +650,13 @@ impl ActualizedCGroupTree {
             let start_signal_clone = start_signal.clone();
             let scheduled_ns_out = scheduled_ns_counters[*leaf_index].clone();
             let node_id = node.node_id;
+            let worker_name = format!("node_{}", node_id);
 
             let child = Child::run(
                 move || {
                     // Just run the CPU hog - parent will add us to cgroup
                     spinner_utilization::cpu_hog_workload(
+                        &worker_name,
                         duration,
                         start_signal_clone,
                         scheduled_ns_out,

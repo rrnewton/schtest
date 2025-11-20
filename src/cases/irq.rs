@@ -11,7 +11,7 @@ use crate::test;
 use crate::util::child::Child;
 use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
-use crate::workloads::spinner_utilization::{self, BenchmarkResults};
+use crate::workloads::spinner_utilization;
 
 use std::collections::HashMap;
 
@@ -885,17 +885,20 @@ fn launch_cgroup_hog(
     _cpu_id: i32,
     cpu_ht: &crate::util::system::Hyperthread,
     cgroup_name: &str,
+    worker_name: &str,
     hog_duration: Duration,
     start_signal: SharedBox<AtomicU32>,
     bogo_ops_out: SharedBox<AtomicU64>,
     scheduled_ns_out: SharedBox<AtomicU64>,
 ) -> Result<Child> {
     let cpu_mask = CPUMask::new(cpu_ht);
+    let name = worker_name.to_string();
 
     let child = Child::run(
         move || {
             cpu_mask.run(|| {
                 spinner_utilization::cpu_hog_workload(
+                    &name,
                     hog_duration,
                     start_signal,
                     scheduled_ns_out,
@@ -1121,6 +1124,7 @@ fn irq_disruption_targeted() -> Result<()> {
         CPU_1,
         &cpu_1_ht,
         "schtest_cpu_max_cpu1",
+        "victim",
         hog_duration,
         start_signal.clone(),
         bogo_ops_cpu1.clone(),
@@ -1132,6 +1136,7 @@ fn irq_disruption_targeted() -> Result<()> {
         CPU_2,
         &cpu_2_ht,
         "schtest_cpu_max_cpu2",
+        "control",
         hog_duration,
         start_signal.clone(),
         bogo_ops_cpu2.clone(),
@@ -1421,7 +1426,7 @@ fn irq_disruption_targeted() -> Result<()> {
         );
     }
 
-    eprintln!("\n=== Bogo Ops Statistics ===");
+    eprintln!("\n=== Bogo Ops Statistics, Per Core ===");
     eprintln!("Min:       {:>20} (CPU {})", min_bogo_ops, min_bogo_cpu);
     eprintln!("Avg:       {:>20}", avg_bogo_ops);
     eprintln!("P50:       {:>20} (CPU {})", p50_bogo_ops, p50_bogo_cpu);
@@ -1431,7 +1436,7 @@ fn irq_disruption_targeted() -> Result<()> {
         bogo_ops_skew, bogo_ops_skew_pct
     );
 
-    eprintln!("\n=== Scheduled Time (ns) Statistics ===");
+    eprintln!("\n=== Scheduled Time (ns) Statistics, Per Core ===");
     eprintln!("Min:       {:>20} (CPU {})", min_scheduled_ns, min_ns_cpu);
     eprintln!("Avg:       {:>20}", avg_scheduled_ns);
     eprintln!("P50:       {:>20} (CPU {})", p50_scheduled_ns, p50_ns_cpu);
@@ -1441,7 +1446,7 @@ fn irq_disruption_targeted() -> Result<()> {
         scheduled_ns_skew, scheduled_ns_skew_pct
     );
 
-    eprintln!("\n=== Bogo Ops/ms Statistics ===");
+    eprintln!("\n=== Bogo Ops/ms Statistics, Per Core ===");
     eprintln!(
         "Min:       {:>20.2} (CPU {})",
         min_ops_per_ms, min_ops_ms_cpu
@@ -1476,10 +1481,10 @@ fn irq_disruption_targeted() -> Result<()> {
             "\n⚠ WARNING: Victim CPU {} did not have lower bogo_ops than control CPU {}",
             CPU_1, CPU_2
         );
-        eprintln!("   This suggests the IPI disruption strategy may not be working as expected.");
+        eprintln!("   This suggests the interrupt disruption strategy may not be working as expected.");
     } else {
         eprintln!(
-            "\n✓ Victim CPU {} has lower bogo_ops than control CPU {} (IPI impact detected)",
+            "\n✓ Victim CPU {} has lower bogo_ops than control CPU {} (interrupt impact detected)",
             CPU_1, CPU_2
         );
     }

@@ -464,13 +464,16 @@ fn compute_results(
 /// This function waits for a start signal, then runs a CPU-intensive spinner
 /// for the specified duration, measuring the actual time scheduled via TSC.
 /// The scheduled time (in nanoseconds) and bogo_ops are written to shared memory.
+/// Upon completion, prints summary statistics including slice count.
 ///
 /// # Arguments
+/// * `name` - Descriptive name for this worker (e.g., "victim", "control")
 /// * `duration` - How long to run the spinner
 /// * `start_signal` - Shared atomic flag; spins until this becomes non-zero
 /// * `scheduled_ns_out` - Shared atomic where the scheduled time (ns) will be written
 /// * `bogo_ops_out` - Optional shared atomic where the bogo ops count will be written
 pub fn cpu_hog_workload(
+    name: &str,
     duration: Duration,
     start_signal: SharedBox<AtomicU32>,
     scheduled_ns_out: SharedBox<AtomicU64>,
@@ -494,4 +497,11 @@ pub fn cpu_hog_workload(
     if let Some(bogo_ops) = bogo_ops_out {
         bogo_ops.store(results.bogo_ops, Ordering::Release);
     }
+
+    // Print summary statistics
+    eprintln!("\n=== Worker '{}' Summary ===", name);
+    eprintln!("  Scheduled time:  {:.3} seconds", results.time_scheduled_ns as f64 / 1e9);
+    eprintln!("  Bogo ops:        {}", format_with_commas(results.bogo_ops));
+    eprintln!("  Total slices:    {}", results.per_window_stats.iter().map(|w| w.num_slices).sum::<usize>());
+    eprintln!("  Windows:         {}", results.per_window_stats.len());
 }
