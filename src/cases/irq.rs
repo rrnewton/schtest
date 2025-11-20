@@ -11,7 +11,7 @@ use crate::test;
 use crate::util::child::Child;
 use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::{CPUMask, CPUSet, System};
-use crate::workloads::spinner_utilization;
+use crate::workloads::spinner_utilization::{self, BenchmarkResults};
 
 use std::collections::HashMap;
 
@@ -635,6 +635,24 @@ fn get_disruption_mode() -> IrqDisruptionMode {
     }
 }
 
+/// Get test duration from environment variable SCHTEST_IRQ_DURATION (in seconds).
+/// Defaults to 10 seconds if not set or invalid.
+fn get_test_duration() -> Duration {
+    match std::env::var("SCHTEST_IRQ_DURATION") {
+        Ok(val) => match val.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                eprintln!(
+                    "Invalid SCHTEST_IRQ_DURATION value '{}', using default 10 seconds",
+                    val
+                );
+                Duration::from_secs(10)
+            }
+        },
+        Err(_) => Duration::from_secs(10),
+    }
+}
+
 /// Read the kernel's maximum allowed perf sample rate
 fn get_max_perf_sample_rate() -> Result<u64> {
     let rate_str = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
@@ -1095,7 +1113,7 @@ fn irq_disruption_targeted() -> Result<()> {
         }
     };
 
-    let hog_duration = Duration::from_secs(10); // TODO: make a CLI flag.
+    let hog_duration = get_test_duration();
     eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
 
     // Launch hog on CPU 1 (victim - receives IPIs)
