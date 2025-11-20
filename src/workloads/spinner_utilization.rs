@@ -3,11 +3,11 @@
 //! This module provides a CPU-intensive workload that measures its own scheduling
 //! behavior by tracking time slices and descheduling events via TSC (Time Stamp Counter).
 
-use std::time::{Duration, Instant};
+use crate::util::shared::SharedBox;
+use serde::{Deserialize, Serialize};
 use std::arch::asm;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use serde::{Serialize, Deserialize};
-use crate::util::shared::SharedBox;
+use std::time::{Duration, Instant};
 
 /// Minimum TSC cycle gap to consider as a descheduling event
 const MIN_DESCHEDULE_CYCLES: u64 = 1000;
@@ -76,7 +76,9 @@ pub fn calibrate_tsc_short(duration_ms: u64) -> (u64, f64) {
     let c0 = rdtsc();
     // Busy-wait until target elapsed; Instant is vDSO-accelerated
     loop {
-        if t0.elapsed() >= target { break; }
+        if t0.elapsed() >= target {
+            break;
+        }
         std::hint::spin_loop();
     }
     let c1 = rdtsc();
@@ -169,7 +171,7 @@ pub fn run_spinner_with_shutdown(
     verbose: bool,
 ) -> BenchmarkResults {
     use std::sync::atomic::Ordering;
-    
+
     let worker_start = Instant::now();
     let mut count: u64 = 0;
     let mut slices = Vec::new();
@@ -377,7 +379,7 @@ fn compute_results(
                 .collect();
             utilizations.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let percentile_keys = [1, 25, 50, 75, 99];
-            
+
             if verbose {
                 eprintln!(
                     "Windowed utilization percentiles ({}ms windows, {} complete windows):",

@@ -1095,7 +1095,7 @@ fn irq_disruption_targeted() -> Result<()> {
         }
     };
 
-    let hog_duration = Duration::from_secs(30);
+    let hog_duration = Duration::from_secs(10); // TODO: make a CLI flag.
     eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
 
     // Launch hog on CPU 1 (victim - receives IPIs)

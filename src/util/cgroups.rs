@@ -77,10 +77,10 @@ impl Cgroup {
         let cgroup_mount = PathBuf::from("/sys/fs/cgroup");
         // Note: joining "/" in the middle will remove the /sys/fs/cgroup prefix and cause an error:
         let new_cgroup_path = if current_cgroup == "/" {
-                cgroup_mount.join(&name)
-            } else {
-                cgroup_mount.join(&current_cgroup).join(&name)
-            };
+            cgroup_mount.join(&name)
+        } else {
+            cgroup_mount.join(&current_cgroup).join(&name)
+        };
 
         fs::create_dir_all(&new_cgroup_path).context("failed to create cgroup directory")?;
 
