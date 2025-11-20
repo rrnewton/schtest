@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Minimum TSC cycle gap to consider as a descheduling event
-const MIN_DESCHEDULE_CYCLES: u64 = 1000;
+const MIN_DESCHEDULE_CYCLES: u64 = 3000;
 
 /// Window size in milliseconds for utilization calculation
 const WINDOW_SIZE_MS: u64 = 100;
@@ -45,6 +45,7 @@ pub struct BenchmarkResults {
     pub total_tsc_ticks: u64,
     pub per_window_stats: Vec<WindowStat>,
     pub utilization_pcts: Percentiles,
+    pub timeslice_pcts: Percentiles,
 }
 
 /// Read the current cycle count using rdtsc
@@ -416,6 +417,53 @@ fn compute_results(
             }
         };
 
+        // Compute timeslice length percentiles
+        let timeslice_percentiles = if !slices.is_empty() {
+            let mut slice_lengths_ms: Vec<f64> = slices
+                .iter()
+                .map(|(start, end)| {
+                    let cycles = end - start;
+                    cycles as f64 / tsc_hz as f64 * 1e3
+                })
+                .collect();
+            slice_lengths_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let percentile_keys = [1, 25, 50, 75, 99];
+
+            if verbose {
+                eprintln!(
+                    "\nTimeslice length percentiles ({} slices):",
+                    slice_lengths_ms.len()
+                );
+            }
+
+            let mut pcts = [0.0; 5];
+            for (i, &p) in percentile_keys.iter().enumerate() {
+                let idx = ((slice_lengths_ms.len() as f64) * (p as f64 / 100.0)).floor() as usize;
+                let idx = idx.min(slice_lengths_ms.len().saturating_sub(1));
+                let val_ms = slice_lengths_ms.get(idx).copied().unwrap_or(0.0);
+                pcts[i] = val_ms;
+                if verbose {
+                    eprintln!("p{:02}: {:.3} ms", p, val_ms);
+                }
+            }
+
+            Percentiles {
+                p01: pcts[0],
+                p25: pcts[1],
+                p50: pcts[2],
+                p75: pcts[3],
+                p99: pcts[4],
+            }
+        } else {
+            Percentiles {
+                p01: 0.0,
+                p25: 0.0,
+                p50: 0.0,
+                p75: 0.0,
+                p99: 0.0,
+            }
+        };
+
         // Build window stats for export
         let json_window_stats: Vec<WindowStat> = stats_to_export
             .iter()
@@ -439,6 +487,7 @@ fn compute_results(
             total_tsc_ticks: total_cycles,
             per_window_stats: json_window_stats,
             utilization_pcts: percentile_values,
+            timeslice_pcts: timeslice_percentiles,
         }
     } else {
         // No slices, empty results
@@ -449,6 +498,13 @@ fn compute_results(
             total_tsc_ticks: total_cycles,
             per_window_stats: vec![],
             utilization_pcts: Percentiles {
+                p01: 0.0,
+                p25: 0.0,
+                p50: 0.0,
+                p75: 0.0,
+                p99: 0.0,
+            },
+            timeslice_pcts: Percentiles {
                 p01: 0.0,
                 p25: 0.0,
                 p50: 0.0,
@@ -498,10 +554,44 @@ pub fn cpu_hog_workload(
         bogo_ops.store(results.bogo_ops, Ordering::Release);
     }
 
-    // Print summary statistics
-    eprintln!("\n=== Worker '{}' Summary ===", name);
-    eprintln!("  Scheduled time:  {:.3} seconds", results.time_scheduled_ns as f64 / 1e9);
-    eprintln!("  Bogo ops:        {}", format_with_commas(results.bogo_ops));
-    eprintln!("  Total slices:    {}", results.per_window_stats.iter().map(|w| w.num_slices).sum::<usize>());
-    eprintln!("  Windows:         {}", results.per_window_stats.len());
+    // Add small random delay (0.0-0.5 seconds) to space out parallel worker summaries
+    let delay_ms = (rand::random::<f64>() * 500.0) as u64;
+    std::thread::sleep(Duration::from_millis(delay_ms));
+
+    // Build summary output in a buffer for atomic printing
+    use std::fmt::Write;
+    let mut output = String::new();
+
+    writeln!(output, "\n=== Worker '{}' Summary ===", name).unwrap();
+    writeln!(output, "  Scheduled time:  {:.3} seconds", results.time_scheduled_ns as f64 / 1e9).unwrap();
+    writeln!(output, "  Bogo ops:        {}", format_with_commas(results.bogo_ops)).unwrap();
+    writeln!(output, "  Total slices:    {}", results.per_window_stats.iter().map(|w| w.num_slices).sum::<usize>()).unwrap();
+    writeln!(output, "  Windows:         {}", results.per_window_stats.len()).unwrap();
+
+    // Find max gap across all windows
+    let max_gap_ns = results.per_window_stats
+        .iter()
+        .map(|w| w.max_gap_ns)
+        .max()
+        .unwrap_or(0);
+    writeln!(output, "  Max gap:         {} ns", format_with_commas(max_gap_ns)).unwrap();
+
+    // Print utilization percentiles
+    writeln!(output, "  Utilization percentiles:").unwrap();
+    writeln!(output, "    p01: {:.2}%", results.utilization_pcts.p01).unwrap();
+    writeln!(output, "    p25: {:.2}%", results.utilization_pcts.p25).unwrap();
+    writeln!(output, "    p50: {:.2}%", results.utilization_pcts.p50).unwrap();
+    writeln!(output, "    p75: {:.2}%", results.utilization_pcts.p75).unwrap();
+    writeln!(output, "    p99: {:.2}%", results.utilization_pcts.p99).unwrap();
+
+    // Print timeslice length percentiles
+    writeln!(output, "  Timeslice length percentiles:").unwrap();
+    writeln!(output, "    p01: {:.3} ms", results.timeslice_pcts.p01).unwrap();
+    writeln!(output, "    p25: {:.3} ms", results.timeslice_pcts.p25).unwrap();
+    writeln!(output, "    p50: {:.3} ms", results.timeslice_pcts.p50).unwrap();
+    writeln!(output, "    p75: {:.3} ms", results.timeslice_pcts.p75).unwrap();
+    writeln!(output, "    p99: {:.3} ms", results.timeslice_pcts.p99).unwrap();
+
+    // Atomically print the entire summary with a single eprintln! call
+    eprintln!("{}", output);
 }
