@@ -1,1 +1,4 @@
 /target
+.vscode-ctags
+perf.data
+perf.data.old

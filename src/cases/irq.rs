@@ -1,5 +1,6 @@
 //! Tests for IRQ disruption with cgroup cpu.max fairness.
 
+use std::env::VarError;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -155,6 +156,12 @@ enum IrqDisruptionMode {
     Timer,
     /// Use all methods simultaneously for maximum IRQ pressure
     Combined,
+}
+
+impl Default for IrqDisruptionMode {
+    fn default() -> Self {
+        IrqDisruptionMode::Combined
+    }
 }
 
 /// Unified handle for any IRQ disruption strategy
@@ -631,7 +638,17 @@ fn get_disruption_mode() -> IrqDisruptionMode {
         Ok(val) if val.eq_ignore_ascii_case("pmu") => IrqDisruptionMode::Pmu,
         Ok(val) if val.eq_ignore_ascii_case("timer") => IrqDisruptionMode::Timer,
         Ok(val) if val.eq_ignore_ascii_case("combined") => IrqDisruptionMode::Combined,
-        _ => IrqDisruptionMode::Combined,
+        Ok(val) if val.is_empty() => IrqDisruptionMode::default(),
+        Err(VarError::NotPresent) => IrqDisruptionMode::default(),
+        Ok(val) => {
+            panic!(
+                "Invalid SCHTEST_IRQ_MODE value '{}'. Valid options: none, futex, pmu, timer, combined",
+                val
+                );
+        },
+        Err(oth) => {
+            panic!("Error reading SCHTEST_IRQ_MODE: {}", oth);
+        }
     }
 }
 
