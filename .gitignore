@@ -1,3 +1,14 @@
 /target
 .venv
 .claude
+
+# Experiment results and logs
+results/
+scripts/*.log
+scripts/*-results.txt
+
+# Editor/IDE files
+.vscode-ctags
+*.swp
+*.swo
+*~

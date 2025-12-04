@@ -83,6 +83,17 @@ class Stressor(ABC):
         return self
 
     @abstractmethod
+    def _create_script(self) -> str:
+        """Generate bash script for stress test execution.
+
+        This script will be wrapped with perf for performance monitoring.
+
+        Returns:
+            Bash script content as a string
+        """
+        pass
+
+    @abstractmethod
     def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
         """Execute the stress test and return (cpu_metrics, mem_metrics).
 
@@ -134,7 +145,7 @@ class StressNGStressor(Stressor):
 
     def _get_mem_params(self, count: int, bytes_per_worker: str, **kwargs: Any) -> str:
         """Get stress-ng memory workload parameters."""
-        method = kwargs.get('method', 'ror')
+        method = kwargs.get('method', 'write64')
         keep = '--vm-keep' if kwargs.get('keep', True) else ''
         return f"--vm {count} {keep} --vm-method {method} --vm-bytes {bytes_per_worker}"
 
@@ -181,6 +192,9 @@ class StressNGStressor(Stressor):
         try:
             with open(yaml_file, 'r') as f:
                 data = yaml.safe_load(f)
+            if data is None:
+                print(f"Warning: Empty or invalid YAML file {yaml_file}, skipping")
+                return None
             metrics_list = data.get('metrics', [{}])
             if not metrics_list or not isinstance(metrics_list, list):
                 return None
@@ -191,7 +205,8 @@ class StressNGStressor(Stressor):
                 real_time=metrics.get('wall-clock-time', 0.0)
             )
         except Exception as e:
-            print(f"Error parsing YAML file {yaml_file}: {e}")
+            print(f"Warning: Could not parse stress-ng YAML file {yaml_file}: {e}")
+            print(f"  (This may be from an incomplete or corrupted run, skipping)")
             return None
 
     def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
@@ -392,7 +407,8 @@ class RTAppStressor(Stressor):
                 bytes_per_worker = '1g'
 
         # Call parent implementation
-        return super().add_mem_stressor(count, cpu_list, bytes_per_worker, **kwargs)
+        super().add_mem_stressor(count, cpu_list, bytes_per_worker, **kwargs)
+        return self
 
     def _parse_memory_size(self, size_str: str) -> int:
         """Parse memory size string (e.g., '1g', '512m') to bytes.
@@ -421,13 +437,17 @@ class RTAppStressor(Stressor):
         """Generate rt-app JSON configuration."""
         tasks = {}
 
-        # Determine max memory buffer size from all memory stressors
+        # The mem_buffer_size in global section is the shared buffer for all threads
+        # Use a reasonable size based on the largest per-worker request, not the sum
+        # Cap at 1GB to avoid excessive memory allocation
         max_mem_buffer = 4 * 1024 * 1024  # Default 4MB
         if self.mem_stressors:
-            max_mem_buffer = max(
+            max_per_worker = max(
                 self._parse_memory_size(mem['bytes_per_worker'])
                 for mem in self.mem_stressors
             )
+            # Use the max per-worker size, but cap at 1GB
+            max_mem_buffer = min(max_per_worker, 1024 * 1024 * 1024)
 
         # Add CPU stressor threads
         for i, cpu_stress in enumerate(self.cpu_stressors):
@@ -447,13 +467,15 @@ class RTAppStressor(Stressor):
         # Add memory stressor threads
         for i, mem_stress in enumerate(self.mem_stressors):
             mem_buffer_size = self._parse_memory_size(mem_stress['bytes_per_worker'])
+            # Cap per-task memory allocation to avoid crashes
+            # Use the capped value from max_mem_buffer calculation
+            capped_mem_size = min(mem_buffer_size, max_mem_buffer)
 
             for instance in range(mem_stress['count']):
                 thread_name = f"mem_{i}_{instance}"
                 thread_config = {
                     "loop": -1,  # Run until duration expires
-                    "mem": 10000,  # Memory operations for 10ms
-                    "sleep": 10000,  # Sleep for 10ms (50% duty cycle)
+                    "mem": capped_mem_size,  # Use capped size to prevent crashes
                 }
 
                 # Add CPU affinity if specified
@@ -472,13 +494,17 @@ class RTAppStressor(Stressor):
                 "pi_enabled": False,
                 "lock_pages": False,
                 "mem_buffer_size": max_mem_buffer,
+                "logdir": str(self.output_dir),
             }
         }
 
         return config
 
-    def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
-        """Execute the stress test and return metrics."""
+    def _create_script(self) -> str:
+        """Generate bash script that calls rt-app with JSON config.
+
+        This allows rt-app to be wrapped with perf just like stress-ng.
+        """
         # Generate and write JSON config
         config = self._create_json_config()
         config_file = self.output_dir / "rt-app-config.json"
@@ -486,9 +512,26 @@ class RTAppStressor(Stressor):
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
 
-        # Execute rt-app
+        # Create bash script that calls rt-app
+        script_content = f"""#!/bin/bash
+set -xeuo pipefail
+{self.rt_app_path} {config_file}
+"""
+        return script_content
+
+    def execute(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Execute the stress test and return metrics."""
+        # Generate script and write it
+        script_content = self._create_script()
+        script_file = self.output_dir / "stress.sh"
+
+        with open(script_file, 'w') as f:
+            f.write(script_content)
+        os.chmod(script_file, 0o755)
+
+        # Execute script
         result = subprocess.run(
-            [self.rt_app_path, str(config_file)],
+            [str(script_file)],
             capture_output=True,
             text=True
         )
@@ -502,16 +545,128 @@ class RTAppStressor(Stressor):
         # Return None for now
         return self.get_metrics()
 
-    def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
-        """Parse and return metrics from already-executed stress test.
+    def _parse_rt_app_log(self, log_file: Path, buffer_size: Optional[int] = None) -> Optional[StressMetrics]:
+        """Parse rt-app log file to extract metrics.
 
-        Note: rt-app doesn't provide bogo-ops metrics like stress-ng.
-        This method returns None for both CPU and memory metrics.
-        If we need metrics later, we can parse rt-app's log files.
+        Args:
+            log_file: Path to rt-app log file
+            buffer_size: For memory workloads, size of buffer per iteration
+
+        Returns:
+            StressMetrics with equivalent bogo-ops, or None if file doesn't exist
         """
-        # rt-app generates log files but they don't contain bogo-ops
-        # Return None to indicate no metrics available
-        cpu_metrics = None if self.cpu_stressors else None
-        mem_metrics = None if self.mem_stressors else None
+        if not log_file.exists():
+            print(f"Warning: rt-app log file not found: {log_file}")
+            return None
+
+        try:
+            import pandas as pd
+
+            # rt-app logs have a header line starting with # that we need to parse
+            # Read the header separately to extract column names
+            with open(log_file, 'r') as f:
+                header_line = f.readline().strip()
+
+            # Remove leading '#' and split on whitespace
+            if header_line.startswith('#'):
+                column_names = header_line[1:].split()
+            else:
+                print(f"Error: Expected header line starting with '#' in {log_file}")
+                return None
+
+            # Now read the data, skipping the header line
+            df = pd.read_csv(log_file, sep=r'\s+', skiprows=1, names=column_names)
+
+            # rt-app logs have columns: idx, perf, run, period, start, end, rel_st, slack, c_duration, c_period, wu_lat
+            if 'perf' not in df.columns:
+                print(f"Error: 'perf' column not found in {log_file}")
+                print(f"  Available columns: {list(df.columns)}")
+                return None
+
+            total_perf = df['perf'].sum()
+
+            # Calculate total runtime in seconds
+            if len(df) > 0:
+                start_time_us = df['start'].iloc[0]
+                end_time_us = df['end'].iloc[-1]
+                real_time = (end_time_us - start_time_us) / 1_000_000  # Convert to seconds
+            else:
+                real_time = 0.0
+
+            # For memory workloads, convert iterations to bytes written
+            # rt-app memload writes entire buffer per iteration
+            if buffer_size is not None:
+                # Each row is one iteration that wrote buffer_size bytes
+                total_bytes = len(df) * buffer_size
+                # Convert to stress-ng equivalent bogo-ops (write64 uses 256 bytes per op)
+                bogo_ops = total_bytes // 256
+            else:
+                # For CPU workloads, use perf directly as bogo-ops
+                # (perf is calibrated loop count, similar conceptually to bogo-ops)
+                bogo_ops = int(total_perf)
+
+            # Calculate bogo-ops per second
+            bogo_ops_per_sec = bogo_ops / real_time if real_time > 0 else 0.0
+
+            return StressMetrics(
+                bogo_ops=bogo_ops,
+                bogo_ops_per_sec_cpu_time=bogo_ops_per_sec,
+                real_time=real_time
+            )
+        except Exception as e:
+            print(f"Error parsing rt-app log {log_file}: {e}")
+            return None
+
+    def get_metrics(self) -> Tuple[Optional[StressMetrics], Optional[StressMetrics]]:
+        """Parse and return metrics from rt-app log files.
+
+        rt-app logs contain:
+        - perf: calibrated loop iterations (for CPU work)
+        - iteration count: number of times workload ran (for memory work)
+
+        We convert these to equivalent stress-ng bogo-ops for comparability.
+
+        When both CPU and mem workloads run together, they finish at the same time
+        (duration expiry), so we normalize their real_time to the maximum observed.
+        """
+        cpu_metrics = None
+        mem_metrics = None
+
+        # Parse CPU metrics from first CPU thread log
+        if self.cpu_stressors:
+            # First CPU task is always thread 0
+            cpu_log = self.output_dir / "rt-app-cpu_0_0-0.log"
+            cpu_metrics = self._parse_rt_app_log(cpu_log)
+
+        # Parse memory metrics from first memory thread log
+        if self.mem_stressors:
+            # When both CPU and mem run together, mem threads start after CPU threads
+            # Calculate total number of CPU threads to determine mem thread start ID
+            total_cpu_threads = sum(cpu_stress['count'] for cpu_stress in self.cpu_stressors) if self.cpu_stressors else 0
+            mem_thread_id = total_cpu_threads  # First mem thread ID
+
+            mem_log = self.output_dir / f"rt-app-mem_0_0-{mem_thread_id}.log"
+            # Get buffer size from first memory stressor, capped to 1GB to match actual allocation
+            buffer_size = self._parse_memory_size(self.mem_stressors[0]['bytes_per_worker'])
+            capped_buffer_size = min(buffer_size, 1024 * 1024 * 1024)
+            mem_metrics = self._parse_rt_app_log(mem_log, buffer_size=capped_buffer_size)
+
+        # When both workloads run together, use the same real_time for both
+        # (they finish at the same time when duration expires)
+        if cpu_metrics and mem_metrics and self.cpu_stressors and self.mem_stressors:
+            # Use the maximum real_time as the true experiment duration
+            max_real_time = max(cpu_metrics.real_time, mem_metrics.real_time)
+
+            # Recalculate bogo_ops_per_sec with normalized time
+            cpu_metrics = StressMetrics(
+                bogo_ops=cpu_metrics.bogo_ops,
+                bogo_ops_per_sec_cpu_time=cpu_metrics.bogo_ops / max_real_time if max_real_time > 0 else 0.0,
+                real_time=max_real_time
+            )
+            mem_metrics = StressMetrics(
+                bogo_ops=mem_metrics.bogo_ops,
+                bogo_ops_per_sec_cpu_time=mem_metrics.bogo_ops / max_real_time if max_real_time > 0 else 0.0,
+                real_time=max_real_time
+            )
 
         return cpu_metrics, mem_metrics

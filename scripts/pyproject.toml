@@ -7,9 +7,9 @@
 typeCheckingMode = "standard"
 
 # Python environment configuration
-pythonPath = "../.venv/bin/python"
-venvPath = ".."
-venv = ".venv"
+pythonPath = "/root/venvs/schtest_venv/bin/python"
+venvPath = "/root/venvs"
+venv = "schtest_venv"
 
 # Include/exclude paths
 include = ["."]

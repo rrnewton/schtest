@@ -26,7 +26,7 @@ from parse_topo import parse_topology, Machine
 # Import scheduler monitor
 from sched_monitor import SchedMonitor, SchedulerType
 # Import stressor classes
-from stressor import Stressor, StressNGStressor, StressMetrics
+from stressor import Stressor, StressNGStressor, RTAppStressor, StressMetrics
 
 
 # Ownership preservation for running as root
@@ -124,12 +124,18 @@ class PinningStrategy(Enum):
     SPREAD = "spread"
     HALF = "half"
 
+class StressorType(Enum):
+    """Enum for stressor backend types"""
+    STRESS_NG = "stress-ng"
+    RT_APP = "rt-app"
+
 @dataclass
 class ExperimentParams:
     """Parameters that uniquely identify an experiment run."""
     workload: WorkloadType
     scheduler: SchedulerType
     pinning: PinningStrategy
+    stressor: StressorType
     num_cores: int
     experiment_duration: int
     machine: str
@@ -141,6 +147,7 @@ class ExperimentParams:
             'workload': self.workload.value,
             'scheduler': self.scheduler.value,
             'pinning': self.pinning.value,
+            'stressor': self.stressor.value,
             'num_cores': self.num_cores,
             'experiment_duration': self.experiment_duration,
             'machine': self.machine,
@@ -154,6 +161,7 @@ class ExperimentParams:
             workload=WorkloadType(data['workload']),
             scheduler=SchedulerType(data['scheduler']),
             pinning=PinningStrategy(data['pinning']),
+            stressor=StressorType(data.get('stressor', 'stress-ng')),  # Default for backward compat
             num_cores=data['num_cores'],
             experiment_duration=data['experiment_duration'],
             machine=data['machine'],
@@ -168,6 +176,7 @@ class ExperimentParams:
             self.workload == other.workload and
             self.scheduler == other.scheduler and
             self.pinning == other.pinning and
+            self.stressor == other.stressor and
             self.num_cores == other.num_cores and
             self.experiment_duration == other.experiment_duration and
             self.machine == other.machine and
@@ -180,6 +189,7 @@ class ExperimentParams:
             self.workload.value,
             self.scheduler.value,
             self.pinning.value,
+            self.stressor.value,
             self.num_cores,
             self.experiment_duration,
             self.machine,
@@ -228,9 +238,28 @@ class ExperimentResult:
 
 
 class ExperimentRunner:
-    def __init__(self, machine_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        machine_name: Optional[str] = None,
+        workloads: Optional[List[WorkloadType]] = None,
+        pinning_strategies: Optional[List[PinningStrategy]] = None,
+        schedulers: Optional[List[SchedulerType]] = None,
+        stressor: StressorType = StressorType.RT_APP,
+        append_mode: bool = False,
+        trials: int = 1,
+        duration: int = EXPERIMENT_DURATION
+    ) -> None:
         self.num_cores = self._get_num_cores()
         self.machine_name = machine_name or self._get_machine_name_from_cpuinfo()
+
+        # Test matrix parameters
+        self.workloads = workloads or [WorkloadType.BOTH, WorkloadType.CPU, WorkloadType.MEM]
+        self.pinning_strategies = pinning_strategies or [PinningStrategy.NONE, PinningStrategy.SPREAD, PinningStrategy.HALF]
+        self.schedulers = schedulers or [SchedulerType.DEFAULT, SchedulerType.SCX_LAVD]
+        self.stressor = stressor
+        self.append_mode = append_mode
+        self.trials = trials
+        self.duration = duration
 
         # Parse CPU topology
         print("Parsing CPU topology...")
@@ -344,22 +373,27 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown pinning strategy: {pinning}")
 
-    def _create_stressor(self, workload: WorkloadType, pinning: PinningStrategy, run_dir: Path) -> StressNGStressor:
+    def _create_stressor(self, workload: WorkloadType, pinning: PinningStrategy, run_dir: Path, stressor_type: StressorType) -> Stressor:
         """Create and configure stressor for given configuration."""
         P = self.num_cores
 
         # Get CPU lists based on pinning strategy
         cpu_list, mem_list = self._get_cpu_list_for_pinning(pinning)
 
-        # Create stressor with output directory
-        stressor = StressNGStressor(EXPERIMENT_DURATION, run_dir)
+        # Create stressor with output directory based on type
+        if stressor_type == StressorType.STRESS_NG:
+            stressor: Stressor = StressNGStressor(self.duration, run_dir)
+        elif stressor_type == StressorType.RT_APP:
+            stressor = RTAppStressor(self.duration, run_dir)
+        else:
+            raise ValueError(f"Unknown stressor type: {stressor_type}")
 
         # Add stressors based on workload type
         if workload in [WorkloadType.BOTH, WorkloadType.CPU]:
             stressor.add_cpu_stressor(P, cpu_list, method='int64')
 
         if workload in [WorkloadType.BOTH, WorkloadType.MEM]:
-            stressor.add_mem_stressor(P, mem_list, f'{P}g', method='ror', keep=True)
+            stressor.add_mem_stressor(P, mem_list, f'{P}g', method='write64', keep=True)
 
         return stressor
 
@@ -378,22 +412,23 @@ class ExperimentRunner:
         except subprocess.CalledProcessError:
             return "unknown"
 
-    def _create_experiment_params(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType) -> ExperimentParams:
+    def _create_experiment_params(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType, stressor: StressorType) -> ExperimentParams:
         """Create experiment parameters for this run."""
         return ExperimentParams(
             workload=workload,
             scheduler=scheduler,
             pinning=pinning,
+            stressor=stressor,
             num_cores=self.num_cores,
-            experiment_duration=EXPERIMENT_DURATION,
+            experiment_duration=self.duration,
             machine=self.machine_name,
             kernel=self._get_kernel_version()
         )
 
-    def _run_experiment(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType = SchedulerType.DEFAULT) -> ExperimentResult:
+    def _run_experiment(self, workload: WorkloadType, pinning: PinningStrategy, scheduler: SchedulerType = SchedulerType.DEFAULT, stressor: StressorType = StressorType.STRESS_NG) -> ExperimentResult:
         """Run a single experiment configuration."""
         print(f"\n{'='*60}")
-        print(f"Running experiment: workload={workload.value}, pinning={pinning.value}, scheduler={scheduler.value}")
+        print(f"Running experiment: workload={workload.value}, pinning={pinning.value}, scheduler={scheduler.value}, stressor={stressor.value}")
         print(f"{'='*60}")
 
         # Create run-specific directory
@@ -405,12 +440,13 @@ class ExperimentRunner:
         print(f"Run directory: {run_dir}")
 
         # Create and configure stressor
-        stressor = self._create_stressor(workload, pinning, run_dir)
+        stressor_obj = self._create_stressor(workload, pinning, run_dir, stressor)
 
         # Ensure correct scheduler is active (lazy switching)
         self._ensure_scheduler(scheduler)
 
         # Run experiment with perf wrapping the stressor execution
+        perf_raw_file = run_dir / "perf_raw.log"
         perf_output_file = run_dir / "perf.json"
         stress_script = run_dir / "stress.sh"
         perf_cmd = [
@@ -422,17 +458,18 @@ class ExperimentRunner:
         print(f"Running: {' '.join(perf_cmd)}")
 
         # Execute stressor (generates script) but wrap with perf for the actual execution
-        script_content = stressor._create_script()
+        # Both StressNGStressor and RTAppStressor now have _create_script()
+        script_content = stressor_obj._create_script()
         with open(stress_script, 'w') as f:
             f.write(script_content)
         os.chmod(stress_script, 0o755)
 
-        # Run with perf
-        with open(perf_output_file, 'w') as perf_file:
+        # Run with perf - capture raw output including rt-app notices
+        with open(perf_raw_file, 'w') as raw_file:
             result = subprocess.run(
                 perf_cmd,
                 stdout=subprocess.PIPE,
-                stderr=perf_file,
+                stderr=raw_file,
                 text=True
             )
 
@@ -440,14 +477,22 @@ class ExperimentRunner:
             print(f"Warning: Experiment failed with return code {result.returncode}")
             print(f"stdout: {result.stdout}")
 
+        # Filter raw output to extract only JSON lines (perf output)
+        # rt-app notices are mixed in with perf JSON, so we need to filter
+        with open(perf_raw_file, 'r') as raw_file, open(perf_output_file, 'w') as json_file:
+            for line in raw_file:
+                # Only keep lines that start with '{' (JSON objects from perf)
+                if line.strip().startswith('{'):
+                    json_file.write(line)
+
         # Parse results using stressor abstraction
-        cpu_metrics, mem_metrics = stressor.get_metrics()
+        cpu_metrics, mem_metrics = stressor_obj.get_metrics()
 
         # Parse perf JSON output
         perf_metrics = self._parse_perf_json(perf_output_file)
 
         # Create experiment parameters
-        params = self._create_experiment_params(workload, pinning, scheduler)
+        params = self._create_experiment_params(workload, pinning, scheduler, stressor)
 
         # Create typed result
         experiment_result = ExperimentResult(
@@ -612,23 +657,27 @@ class ExperimentRunner:
 
     def _get_planned_experiments(self) -> List[ExperimentParams]:
         """Get list of all experiments we plan to run."""
-        workloads = [WorkloadType.BOTH, WorkloadType.CPU, WorkloadType.MEM]
-        pinning_strategies = [PinningStrategy.NONE, PinningStrategy.SPREAD, PinningStrategy.HALF]
-        schedulers = [SchedulerType.DEFAULT, SchedulerType.SCX_LAVD]
-
         planned = []
-        for scheduler in schedulers:
-            for workload in workloads:
-                for pinning in pinning_strategies:
-                    params = self._create_experiment_params(workload, pinning, scheduler)
-                    planned.append(params)
+        for trial in range(self.trials):
+            for scheduler in self.schedulers:
+                for workload in self.workloads:
+                    for pinning in self.pinning_strategies:
+                        params = self._create_experiment_params(workload, pinning, scheduler, self.stressor)
+                        planned.append(params)
 
         return planned
 
     def _get_missing_experiments(self, existing: List[ExperimentParams], planned: List[ExperimentParams]) -> List[ExperimentParams]:
-        """Get list of experiments that still need to be run."""
-        existing_set = set(existing)
-        return [params for params in planned if params not in existing_set]
+        """Get list of experiments that still need to be run.
+
+        In append mode, returns all planned experiments (to re-run them).
+        Otherwise, filters out experiments that already exist.
+        """
+        if self.append_mode:
+            return planned  # Run all planned experiments regardless of existing ones
+        else:
+            existing_set = set(existing)
+            return [params for params in planned if params not in existing_set]
 
     def run_all_experiments(self) -> None:
         """Run all experiment combinations with incremental support."""
@@ -670,7 +719,7 @@ class ExperimentRunner:
             for i, params in enumerate(missing_experiments):
                 print(f"\nProgress: {i+1}/{len(missing_experiments)} (missing experiments)")
 
-                result = self._run_experiment(params.workload, params.pinning, params.scheduler)
+                result = self._run_experiment(params.workload, params.pinning, params.scheduler, params.stressor)
                 self.results.append(result)
 
                 # Save intermediate results after each experiment
@@ -709,7 +758,7 @@ class ExperimentRunner:
             return None
 
         # Create stressor configured for this workload type (for metrics parsing)
-        stressor = self._create_stressor(params.workload, params.pinning, run_dir)
+        stressor = self._create_stressor(params.workload, params.pinning, run_dir, params.stressor)
         cpu_metrics, mem_metrics = stressor.get_metrics()
 
         # Parse perf JSON output
@@ -809,23 +858,30 @@ class ExperimentRunner:
             both_workloads['time_ratio'] = both_workloads['real_time_mem'] / both_workloads['real_time_cpu']
             both_workloads['skew_percent'] = (both_workloads['time_ratio'] - 1.0) * 100
 
-            max_skew = both_workloads['skew_percent'].abs().max()
-            median_skew = both_workloads['skew_percent'].median()
-            mean_skew = both_workloads['skew_percent'].mean()
+            # Filter out NaN values for statistics
+            valid_skew = both_workloads['skew_percent'].dropna()
 
-            print(f"Max skew:     {max_skew:6.1f}% (memory workload time vs CPU workload time)")
-            print(f"Median skew:  {median_skew:6.1f}%")
-            print(f"Average skew: {mean_skew:6.1f}%")
+            if len(valid_skew) > 0:
+                max_skew = valid_skew.abs().max()
+                median_skew = valid_skew.median()
+                mean_skew = valid_skew.mean()
 
-            # Show the worst offenders
-            worst_case = both_workloads.loc[both_workloads['skew_percent'].abs().idxmax()]
-            print(f"\nWorst case: {worst_case['scheduler']}/{worst_case['pinning']}")
-            print(f"  CPU time: {worst_case['real_time_cpu']:.2f}s, MEM time: {worst_case['real_time_mem']:.2f}s")
-            print(f"  Skew: {worst_case['skew_percent']:.1f}%")
+                print(f"Max skew:     {max_skew:6.1f}% (memory workload time vs CPU workload time)")
+                print(f"Median skew:  {median_skew:6.1f}%")
+                print(f"Average skew: {mean_skew:6.1f}%")
+
+                # Show the worst offenders (only if we have valid data)
+                worst_idx = valid_skew.abs().idxmax()
+                worst_case = both_workloads.loc[worst_idx]
+                print(f"\nWorst case: {worst_case['scheduler']}/{worst_case['pinning']}")
+                print(f"  CPU time: {worst_case['real_time_cpu']:.2f}s, MEM time: {worst_case['real_time_mem']:.2f}s")
+                print(f"  Skew: {worst_case['skew_percent']:.1f}%")
+            else:
+                print("No valid timing data available for skew analysis")
 
         # Print summary table
         print("\nSummary Results:")
-        summary_cols = ['scheduler', 'workload', 'pinning', 'cpu_normalized', 'mem_normalized', 'combined_tput']
+        summary_cols = ['scheduler', 'workload', 'pinning', 'stressor', 'cpu_normalized', 'mem_normalized', 'combined_tput']
         # Sort by scheduler first, then workload and pinning for consistent display
         df_sorted = df.sort_values(['scheduler', 'workload', 'pinning'])
         print(df_sorted[summary_cols].round(1).to_string(index=False))
@@ -953,12 +1009,66 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CPU Scheduling Experiment")
     parser.add_argument("--machine", type=str, default=None,
                        help="Machine name tag (default: auto-detect from /proc/cpuinfo)")
+    parser.add_argument("--stressor", type=str, default="rt-app", choices=["stress-ng", "rt-app"],
+                       help="Stressor backend to use (default: rt-app)")
+    parser.add_argument("--workloads", type=str, default="both,cpu,mem",
+                       help="Comma-separated list of workloads: both,cpu,mem (default: both,cpu,mem)")
+    parser.add_argument("--pinning", type=str, default="none,spread,half",
+                       help="Comma-separated list of pinning strategies: none,spread,half (default: none,spread,half)")
+    parser.add_argument("--schedulers", type=str, default="default,scx-lavd",
+                       help="Comma-separated list of schedulers: default,scx-lavd (default: default,scx-lavd)")
+    parser.add_argument("--append", action="store_true",
+                       help="Append mode: re-run experiments even if they already exist")
+    parser.add_argument("--trials", type=int, default=1,
+                       help="Number of trials to run for each configuration (default: 1)")
+    parser.add_argument("--seconds", type=int, default=6,
+                       help="Duration of each experiment in seconds (default: 6)")
     args = parser.parse_args()
+
+    # Parse comma-separated lists into enum types
+    def parse_workloads(s: str) -> List[WorkloadType]:
+        mapping = {'both': WorkloadType.BOTH, 'cpu': WorkloadType.CPU, 'mem': WorkloadType.MEM}
+        return [mapping[w.strip().lower()] for w in s.split(',')]
+
+    def parse_pinning(s: str) -> List[PinningStrategy]:
+        mapping = {'none': PinningStrategy.NONE, 'spread': PinningStrategy.SPREAD, 'half': PinningStrategy.HALF}
+        return [mapping[p.strip().lower()] for p in s.split(',')]
+
+    def parse_schedulers(s: str) -> List[SchedulerType]:
+        mapping = {'default': SchedulerType.DEFAULT, 'scx-lavd': SchedulerType.SCX_LAVD}
+        return [mapping[sched.strip().lower()] for sched in s.split(',')]
+
+    def parse_stressor(s: str) -> StressorType:
+        mapping = {'stress-ng': StressorType.STRESS_NG, 'rt-app': StressorType.RT_APP}
+        return mapping[s.strip().lower()]
+
+    workloads = parse_workloads(args.workloads)
+    pinning_strategies = parse_pinning(args.pinning)
+    schedulers = parse_schedulers(args.schedulers)
+    stressor = parse_stressor(args.stressor)
 
     print("CPU Scheduling Experiment")
     print("=" * 40)
+    print(f"Configuration:")
+    print(f"  Stressor: {stressor.value}")
+    print(f"  Workloads: {[w.value for w in workloads]}")
+    print(f"  Pinning: {[p.value for p in pinning_strategies]}")
+    print(f"  Schedulers: {[s.value for s in schedulers]}")
+    print(f"  Duration: {args.seconds} seconds")
+    print(f"  Trials: {args.trials}")
+    print(f"  Append mode: {args.append}")
+    print("=" * 40)
 
-    runner = ExperimentRunner(machine_name=args.machine)
+    runner = ExperimentRunner(
+        machine_name=args.machine,
+        workloads=workloads,
+        pinning_strategies=pinning_strategies,
+        schedulers=schedulers,
+        stressor=stressor,
+        append_mode=args.append,
+        trials=args.trials,
+        duration=args.seconds
+    )
     print(f"Machine: {runner.machine_name}")
     print(f"Detected {runner.num_cores} physical cores")
     print(f"Results directory: {runner.results_dir}")
@@ -971,15 +1081,25 @@ def main() -> None:
             # Register exit handler to fix ownership on exit (success or error)
             atexit.register(lambda: _fix_ownership_recursive(RESULTS_DIR, target_uid, target_gid))
 
-    # Check dependencies
-    try:
-        subprocess.run(["stress-ng", "--version"],
-                      capture_output=True, check=True)
-        print("stress-ng is available")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("ERROR: stress-ng is not installed!")
-        print("Please install it with: sudo apt-get install stress-ng")
-        return
+    # Check dependencies based on selected stressor
+    if stressor == StressorType.STRESS_NG:
+        try:
+            subprocess.run(["stress-ng", "--version"],
+                          capture_output=True, check=True)
+            print("stress-ng is available")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("ERROR: stress-ng is not installed!")
+            print("Please install it with: sudo apt-get install stress-ng")
+            return
+    elif stressor == StressorType.RT_APP:
+        try:
+            from stressor import find_rt_app
+            rt_app_path = find_rt_app()
+            print(f"rt-app is available at {rt_app_path}")
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            print("Please build rt-app (see ../rt-app)")
+            return
 
     try:
         subprocess.run(["perf", "--version"],
