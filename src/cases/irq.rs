@@ -940,7 +940,7 @@ fn launch_cgroup_hog(
 
 /// Test IRQ disruption impact on cgroup cpu.max fairness.
 ///
-/// This test creates two CPU hogs on CPU 1 and CPU 2, both limited to 10% cpu.max.
+/// This test creates two CPU hogs on CPU 1 and CPU 2, both limited to by cpu.max.
 /// Additionally, PMU sampling generates high-frequency PMIs (Performance Monitoring
 /// Interrupts) on CPU 1 (victim) at IRQ_HZ frequency. PMIs are NMI-like interrupts
 /// that preempt almost everything, simulating heavy IRQ load.
