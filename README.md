@@ -39,3 +39,9 @@ This will:
 2. Wait for it to install a custom scheduler
 3. Run the tests against that scheduler
 4. Kill the scheduler when done
+
+## Python CPU Scheduling Experiments
+
+The `scripts/` directory contains a self-contained Python project for CPU scheduling experiments using stress-ng and perf. This provides a different approach to scheduler testing.
+
+See [`scripts/README.md`](scripts/README.md) for complete documentation including.

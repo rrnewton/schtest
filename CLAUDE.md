@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **schtest** is a scheduler testing and benchmarking framework written in Rust. It tests Linux scheduler functionality, particularly for sched_ext (extensible scheduler) implementations.
 
+This project consists of different pieces related to Linux scheduler microbenchmarking:
+ - ./src: Rust targeted scheduler test cases / microbenchmarks
+ - ./scripts: Python scripts providing more microbenchmarks and utilities
+
+We will be using beads (`bd quickstart`) for local issue tracking.
+
 ## Running schedulers and recording scheduler
 
 Schedulers are mostly stored in the sched_ext/scx repository. They are binaries such as `scx_lavd`, which, when run, modify the global scheduler on the Linux system. Whenever you run a benchmark, you should make a note of which scheduler is running on the system:

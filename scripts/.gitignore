@@ -1,0 +1,9 @@
+coverage.xml
+htmlcov
+.DS_Store
+__pycache__
+test-results.xml
+.coverage
+._.DS_Store
+results
+trash
