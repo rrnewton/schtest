@@ -472,6 +472,9 @@ struct TimerIrqHandle {
     wakeup_count: SharedBox<AtomicU64>,
 }
 
+/// Number of parallel timers to create for maximum interrupt load
+const NUM_TIMERS: usize = 8;
+
 impl TimerIrqHandle {
     /// Stop the timer disruption and return wakeup count
     fn stop(self) -> Result<u64> {
@@ -484,9 +487,9 @@ impl TimerIrqHandle {
 
 /// Launch timer-based IRQ disruption on victim CPU
 ///
-/// Uses setitimer() with SIGALRM to generate high-frequency timer interrupts.
-/// The signal handler does minimal work (just increments a counter), so most
-/// time is wasted in kernel interrupt context, not userspace.
+/// Creates NUM_TIMERS (8) separate POSIX timers using real-time signals
+/// to generate high-frequency timer interrupts. Real-time signals can be
+/// queued, allowing for much higher effective interrupt rates than SIGALRM.
 fn launch_timer_irq_disruption(
     allocator: std::sync::Arc<BumpAllocator>,
     victim_cpu: &crate::util::system::Hyperthread,
@@ -510,8 +513,8 @@ fn launch_timer_irq_disruption(
                     std::hint::spin_loop();
                 }
 
-                // Set up signal handler for SIGALRM that does minimal work
-                // The handler just increments the counter - most time is wasted in kernel
+                // Set up signal handlers for real-time signals
+                // Real-time signals (SIGRTMIN+n) can be queued unlike standard signals
                 static SIGNAL_COUNT: AtomicU64 = AtomicU64::new(0);
 
                 extern "C" fn timer_signal_handler(_sig: i32) {
@@ -519,19 +522,22 @@ fn launch_timer_irq_disruption(
                     SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
                 }
 
-                // Install signal handler
-                let sa = libc::sigaction {
-                    sa_sigaction: timer_signal_handler as usize,
-                    sa_mask: unsafe { std::mem::zeroed() },
-                    sa_flags: libc::SA_RESTART,
-                    sa_restorer: None,
-                };
+                // Install signal handlers for all our real-time signals
+                for i in 0..NUM_TIMERS {
+                    let signo = libc::SIGRTMIN() + i as i32;
+                    let sa = libc::sigaction {
+                        sa_sigaction: timer_signal_handler as usize,
+                        sa_mask: unsafe { std::mem::zeroed() },
+                        sa_flags: libc::SA_RESTART,
+                        sa_restorer: None,
+                    };
 
-                let ret = unsafe { libc::sigaction(libc::SIGALRM, &sa, std::ptr::null_mut()) };
+                    let ret = unsafe { libc::sigaction(signo, &sa, std::ptr::null_mut()) };
 
-                if ret < 0 {
-                    let errno = unsafe { *libc::__errno_location() };
-                    panic!("sigaction failed: errno={}", errno);
+                    if ret < 0 {
+                        let errno = unsafe { *libc::__errno_location() };
+                        panic!("sigaction for SIGRTMIN+{} failed: errno={}", i, errno);
+                    }
                 }
 
                 // Calculate timer interval in nanoseconds
@@ -539,49 +545,63 @@ fn launch_timer_irq_disruption(
                 let interval_sec = interval_ns / 1_000_000_000;
                 let interval_nsec = interval_ns % 1_000_000_000;
 
-                // Create POSIX timer using timer_create
-                let mut timer_id: libc::timer_t = std::ptr::null_mut();
-                let mut sev: libc::sigevent = unsafe { std::mem::zeroed() };
-                sev.sigev_notify = libc::SIGEV_SIGNAL;
-                sev.sigev_signo = libc::SIGALRM;
-                sev.sigev_value.sival_ptr = std::ptr::null_mut();
+                // Create NUM_TIMERS POSIX timers, each firing at timer_hz
+                let mut timer_ids: Vec<libc::timer_t> = Vec::with_capacity(NUM_TIMERS);
 
-                let ret =
-                    unsafe { libc::timer_create(libc::CLOCK_MONOTONIC, &mut sev, &mut timer_id) };
+                for i in 0..NUM_TIMERS {
+                    let mut timer_id: libc::timer_t = std::ptr::null_mut();
+                    let mut sev: libc::sigevent = unsafe { std::mem::zeroed() };
+                    sev.sigev_notify = libc::SIGEV_SIGNAL;
+                    sev.sigev_signo = libc::SIGRTMIN() + i as i32;
+                    sev.sigev_value.sival_ptr = std::ptr::null_mut();
 
-                if ret < 0 {
-                    let errno = unsafe { *libc::__errno_location() };
-                    panic!("timer_create failed: errno={}", errno);
-                }
+                    let ret = unsafe {
+                        libc::timer_create(libc::CLOCK_MONOTONIC, &mut sev, &mut timer_id)
+                    };
 
-                // Set up timer to fire at timer_hz frequency
-                let timer_spec = libc::itimerspec {
-                    it_interval: libc::timespec {
-                        tv_sec: interval_sec as i64,
-                        tv_nsec: interval_nsec as i64,
-                    },
-                    it_value: libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: interval_nsec as i64, // First expiry
-                    },
-                };
+                    if ret < 0 {
+                        let errno = unsafe { *libc::__errno_location() };
+                        panic!("timer_create {} failed: errno={}", i, errno);
+                    }
 
-                let ret =
-                    unsafe { libc::timer_settime(timer_id, 0, &timer_spec, std::ptr::null_mut()) };
+                    // Stagger initial expiry to spread interrupts across time
+                    // Each timer starts at offset (i * interval_ns / NUM_TIMERS)
+                    let stagger_ns = (i as u64 * interval_ns) / NUM_TIMERS as u64;
+                    let initial_nsec = if stagger_ns == 0 {
+                        interval_nsec as i64
+                    } else {
+                        stagger_ns as i64
+                    };
 
-                if ret < 0 {
-                    let errno = unsafe { *libc::__errno_location() };
-                    panic!("timer_settime failed: errno={}", errno);
+                    let timer_spec = libc::itimerspec {
+                        it_interval: libc::timespec {
+                            tv_sec: interval_sec as i64,
+                            tv_nsec: interval_nsec as i64,
+                        },
+                        it_value: libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: initial_nsec,
+                        },
+                    };
+
+                    let ret = unsafe {
+                        libc::timer_settime(timer_id, 0, &timer_spec, std::ptr::null_mut())
+                    };
+
+                    if ret < 0 {
+                        let errno = unsafe { *libc::__errno_location() };
+                        panic!("timer_settime {} failed: errno={}", i, errno);
+                    }
+
+                    timer_ids.push(timer_id);
                 }
 
                 eprintln!(
-                    "Timer interrupts enabled on CPU {} at {} Hz (using SIGALRM)",
-                    cpu_id, timer_hz
+                    "Timer interrupts enabled on CPU {} at {} Hz x {} timers = {} Hz effective (using SIGRTMIN signals)",
+                    cpu_id, timer_hz, NUM_TIMERS, timer_hz * NUM_TIMERS as u64
                 );
 
-                // Use pause() to block indefinitely - timer signals will interrupt this
-                // Each signal increments SIGNAL_COUNT then returns from pause()
-                // We spin in userspace doing minimal work, just blocking and handling signals
+                // Spin in userspace handling signals
                 loop {
                     if timer_stop.load(Ordering::Acquire) != 0 {
                         break;
@@ -591,9 +611,7 @@ fn launch_timer_irq_disruption(
                     let count = SIGNAL_COUNT.load(Ordering::Relaxed);
                     timer_count.store(count, Ordering::Release);
 
-                    // Use nanosleep for a very short time (10us) to let signals interrupt
-                    // The SA_RESTART flag will cause nanosleep to restart after each signal
-                    // This creates a tight loop that gets interrupted by timer signals
+                    // Use nanosleep for a very short time to let signals interrupt
                     let sleep_spec = libc::timespec {
                         tv_sec: 0,
                         tv_nsec: 10_000, // 10 microseconds
@@ -603,9 +621,11 @@ fn launch_timer_irq_disruption(
                     }
                 }
 
-                // Disable and delete timer
-                unsafe {
-                    libc::timer_delete(timer_id);
+                // Delete all timers
+                for timer_id in timer_ids {
+                    unsafe {
+                        libc::timer_delete(timer_id);
+                    }
                 }
 
                 // Store final count
@@ -949,7 +969,7 @@ fn irq_disruption_targeted() -> Result<()> {
     const CPU_2: i32 = 2;
     const WAKER_CPU: i32 = 0; // Only used for Futex mode
     const CPU_MAX_PERCENT: f64 = 50.0;
-    const IRQ_HZ: u64 = 100 * 1000;
+    const IRQ_HZ: u64 = 140 * 1000; // 140kHz - kernel max for hrtimer
     let disruption_mode: IrqDisruptionMode = get_disruption_mode();
 
     let system = System::load()?;
@@ -985,7 +1005,7 @@ fn irq_disruption_targeted() -> Result<()> {
             );
         }
         IrqDisruptionMode::Timer => {
-            eprintln!("  Timer interrupts on CPU {} at {} Hz", CPU_1, IRQ_HZ);
+            eprintln!("  Timer interrupts on CPU {} at {} Hz x {} timers = {} Hz effective", CPU_1, IRQ_HZ, NUM_TIMERS, IRQ_HZ * NUM_TIMERS as u64);
         }
         IrqDisruptionMode::Combined => {
             eprintln!("  COMBINED mode: PMU sampling + Futex IPI + Timer interrupts");
@@ -994,7 +1014,7 @@ fn irq_disruption_targeted() -> Result<()> {
                 "    Futex: Waker on CPU {} -> Receiver on CPU {} at {} Hz",
                 WAKER_CPU, CPU_1, IRQ_HZ
             );
-            eprintln!("    Timer: CPU {} at {} Hz", CPU_1, IRQ_HZ);
+            eprintln!("    Timer: CPU {} at {} Hz x {} timers", CPU_1, IRQ_HZ, NUM_TIMERS);
         }
     }
 
@@ -1122,7 +1142,7 @@ fn irq_disruption_targeted() -> Result<()> {
         }
         IrqDisruptionMode::Timer => {
             eprintln!("\nLaunching IRQ disruption...");
-            eprintln!("  Timer mode: timerfd on CPU {} at {} Hz", CPU_1, IRQ_HZ);
+            eprintln!("  Timer mode: {} timers on CPU {} at {} Hz each", NUM_TIMERS, CPU_1, IRQ_HZ);
             let handle = launch_timer_irq_disruption(
                 allocator.clone(),
                 &cpu_1_ht,
@@ -1218,8 +1238,8 @@ fn irq_disruption_targeted() -> Result<()> {
         IrqDisruptionStats::Timer { timer_wakeups } => {
             eprintln!("\n=== Timer Disruption Stats ===");
             eprintln!(
-                "Timer: {} wakeups total at {} Hz on CPU {}",
-                timer_wakeups, IRQ_HZ, CPU_1
+                "Timer: {} wakeups total at {} Hz x {} timers = {} Hz effective on CPU {}",
+                timer_wakeups, IRQ_HZ, NUM_TIMERS, IRQ_HZ * NUM_TIMERS as u64, CPU_1
             );
         }
         IrqDisruptionStats::Combined {
@@ -1243,7 +1263,7 @@ fn irq_disruption_targeted() -> Result<()> {
                 0.0
             };
             eprintln!("    Block rate:                {:.2}%", block_pct);
-            eprintln!("\nTimer: {} wakeups total", timer_wakeups);
+            eprintln!("\nTimer: {} wakeups total ({} timers at {} Hz each)", timer_wakeups, NUM_TIMERS, IRQ_HZ);
         }
     }
 
