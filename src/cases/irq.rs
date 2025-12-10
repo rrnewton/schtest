@@ -1,4 +1,13 @@
 //! Tests for IRQ disruption with cgroup cpu.max fairness.
+//!
+//! # Environment Variables
+//!
+//! - `SCHTEST_IRQ_MODE`: Controls the IRQ disruption strategy.
+//!   Valid values: `none`, `futex`, `pmu`, `timer`, `combined` (case-insensitive).
+//!   Defaults to `timer` if not set.
+//!
+//! - `SCHTEST_IRQ_DURATION`: Test duration in seconds.
+//!   Must be a positive integer. Defaults to `10` if not set or invalid.
 
 use std::env::VarError;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -160,7 +169,7 @@ enum IrqDisruptionMode {
 
 impl Default for IrqDisruptionMode {
     fn default() -> Self {
-        IrqDisruptionMode::Combined
+        IrqDisruptionMode::Timer
     }
 }
 
