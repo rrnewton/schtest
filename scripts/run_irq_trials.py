@@ -10,11 +10,14 @@ LAVD Versions tested:
 - EEVDF (baseline): Native kernel scheduler without sched_ext
 - main: ac58df714beda5f7d7c0a5ccfd9c493023600f00
 - sans_irq_accounting: 35999abe5f39acde0bd7a38097c2fd302972ace8
-- irq (new load balancing): 424b17be3e6bc613ec86913d7ee1024ee2222a20
+
+LAVD is run with flags: --performance --pinned-slice-us=5000 --slice-min-us=5000
+                        --slice-max-us=10000 --enable-cpu-bw
 
 Usage:
     sudo python3 scripts/run_irq_trials.py --trials 10
     sudo python3 scripts/run_irq_trials.py --trials 5 --skip-build  # Use existing binaries
+    sudo python3 scripts/run_irq_trials.py --restart-lavd  # Restart LAVD per trial
 """
 
 import argparse
@@ -37,8 +40,16 @@ from typing import Optional
 LAVD_VERSIONS = {
     "main": "ac58df714beda5f7d7c0a5ccfd9c493023600f00",
     "sans_irq_accounting": "35999abe5f39acde0bd7a38097c2fd302972ace8",
-    "irq": "424b17be3e6bc613ec86913d7ee1024ee2222a20",
 }
+
+# LAVD command-line flags for consistent behavior
+LAVD_FLAGS = [
+    "--performance",
+    "--pinned-slice-us=5000",
+    "--slice-min-us=5000",
+    "--slice-max-us=10000",
+    "--enable-cpu-bw",
+]
 
 # Directory to store built binaries (relative to repo root)
 BIN_DIR = "bin"
@@ -261,9 +272,12 @@ def build_schtest(repo_root: Path) -> Path:
 
 
 def start_lavd(lavd_path: Path, extra_args: list[str] = None) -> subprocess.Popen:
-    """Start scx_lavd scheduler."""
-    cmd = ["sudo", str(lavd_path)] + (extra_args or [])
+    """Start scx_lavd scheduler with standard flags."""
+    # Combine LAVD_FLAGS with any extra args
+    args = LAVD_FLAGS + (extra_args or [])
+    cmd = ["sudo", str(lavd_path)] + args
     print(f"  Starting LAVD: {lavd_path.name}")
+    print(f"    Flags: {' '.join(args)}")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -401,8 +415,14 @@ def run_all_trials(
     duration: int,
     save_raw: bool = False,
     output_dir: Optional[Path] = None,
+    restart_lavd: bool = False,
 ) -> dict[str, SchedulerStats]:
-    """Run all trials for all schedulers."""
+    """Run all trials for all schedulers.
+
+    Args:
+        restart_lavd: If True, restart LAVD for each trial. If False (default),
+                      start LAVD once per version and run all trials.
+    """
     stats = {}
 
     # Run EEVDF (no sched_ext) trials first
@@ -426,34 +446,64 @@ def run_all_trials(
         print("\n" + "=" * 70)
         print(f"Running LAVD {name} trials")
         print(f"  Binary: {lavd_path}")
+        if restart_lavd:
+            print("  Mode: Restarting LAVD per-trial")
+        else:
+            print("  Mode: LAVD running for all trials")
         print("=" * 70)
 
         sched_stats = SchedulerStats(scheduler=f"lavd_{name}")
 
-        for trial in range(1, n_trials + 1):
-            # Start the scheduler
+        if restart_lavd:
+            # Restart LAVD for each trial (helps with stalling issues)
+            for trial in range(1, n_trials + 1):
+                try:
+                    lavd_proc = start_lavd(lavd_path)
+                except Exception as e:
+                    print(f"  ERROR: Failed to start LAVD: {e}")
+                    break
+
+                try:
+                    result = run_single_trial(
+                        f"lavd_{name}",
+                        trial,
+                        schtest_path,
+                        lavd_path,
+                        duration,
+                        save_raw,
+                        output_dir,
+                    )
+                    sched_stats.trials.append(result)
+                finally:
+                    stop_lavd(lavd_proc)
+
+                # Brief pause between trials
+                time.sleep(1)
+        else:
+            # Start LAVD once for all trials (default)
             try:
                 lavd_proc = start_lavd(lavd_path)
             except Exception as e:
                 print(f"  ERROR: Failed to start LAVD: {e}")
-                break
+                stats[f"lavd_{name}"] = sched_stats
+                continue
 
             try:
-                result = run_single_trial(
-                    f"lavd_{name}",
-                    trial,
-                    schtest_path,
-                    lavd_path,
-                    duration,
-                    save_raw,
-                    output_dir,
-                )
-                sched_stats.trials.append(result)
+                for trial in range(1, n_trials + 1):
+                    result = run_single_trial(
+                        f"lavd_{name}",
+                        trial,
+                        schtest_path,
+                        lavd_path,
+                        duration,
+                        save_raw,
+                        output_dir,
+                    )
+                    sched_stats.trials.append(result)
+                    # Brief pause between trials
+                    time.sleep(1)
             finally:
                 stop_lavd(lavd_proc)
-
-            # Brief pause between trials
-            time.sleep(1)
 
         stats[f"lavd_{name}"] = sched_stats
 
@@ -565,6 +615,11 @@ def main():
         type=Path,
         help="Path to existing scx repo (avoids cloning)",
     )
+    parser.add_argument(
+        "--restart-lavd",
+        action="store_true",
+        help="Restart LAVD scheduler per-trial instead of once per version (helps with stalling)",
+    )
 
     args = parser.parse_args()
 
@@ -668,6 +723,7 @@ def main():
         args.duration,
         args.save_raw,
         args.output_dir,
+        args.restart_lavd,
     )
 
     # Print summary
