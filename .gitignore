@@ -7,6 +7,9 @@ results/
 scripts/*.log
 scripts/*-results.txt
 
+# Built binaries (scx_lavd versions)
+bin/
+
 # Editor/IDE files
 .vscode-ctags
 *.swp
