@@ -1,48 +1,40 @@
-//! Tests for IRQ disruption with cgroup cpu.max fairness.
+//! Common infrastructure for IRQ disruption tests.
 //!
-//! # Environment Variables
-//!
-//! - `SCHTEST_IRQ_MODE`: Controls the IRQ disruption strategy.
-//!   Valid values: `none`, `futex`, `pmu`, `timer`, `combined` (case-insensitive).
-//!   Defaults to `timer` if not set.
-//!
-//! - `SCHTEST_IRQ_DURATION`: Test duration in seconds.
-//!   Must be a positive integer. Defaults to `10` if not set or invalid.
+//! This module provides shared utilities for tests that measure the impact of
+//! IRQ load on scheduler behavior. It includes:
+//! - Interrupt snapshot capture from /proc/interrupts
+//! - Multiple IRQ disruption strategies (timer, futex IPI, PMU sampling)
+//! - Helper functions for environment variables and logging
 
+use std::collections::HashMap;
 use std::env::VarError;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cgroups_rs::fs::cgroup_builder::CgroupBuilder;
-use cgroups_rs::fs::hierarchies;
 
-use crate::test;
 use crate::util::child::Child;
 use crate::util::shared::{BumpAllocator, SharedBox};
-use crate::util::system::{CPUMask, CPUSet, System};
-use crate::workloads::spinner_utilization;
-
-use std::collections::HashMap;
+use crate::util::system::{CPUMask, CPUSet, Hyperthread};
 
 /// Per-CPU interrupt counts parsed from /proc/interrupts
 #[derive(Debug, Clone)]
-struct InterruptSnapshot {
+pub struct InterruptSnapshot {
     /// Total interrupt count per CPU (sum of all interrupt types)
-    per_cpu_total: HashMap<usize, u64>,
+    pub per_cpu_total: HashMap<usize, u64>,
     /// Rescheduling interrupts (RES) - IPIs for rescheduling
-    per_cpu_reschedule: HashMap<usize, u64>,
+    pub per_cpu_reschedule: HashMap<usize, u64>,
     /// Function call interrupts (CAL) - IPIs for function calls
-    per_cpu_function_call: HashMap<usize, u64>,
+    pub per_cpu_function_call: HashMap<usize, u64>,
     /// TLB shootdown interrupts (TLB) - IPIs for TLB invalidation
-    per_cpu_tlb: HashMap<usize, u64>,
+    pub per_cpu_tlb: HashMap<usize, u64>,
     /// Number of CPUs detected
-    num_cpus: usize,
+    pub num_cpus: usize,
 }
 
 impl InterruptSnapshot {
     /// Parse /proc/interrupts and sum all interrupt types per CPU
-    fn capture() -> Result<Self> {
+    pub fn capture() -> Result<Self> {
         let data = std::fs::read_to_string("/proc/interrupts")
             .context("Failed to read /proc/interrupts")?;
 
@@ -105,7 +97,7 @@ impl InterruptSnapshot {
     }
 
     /// Calculate delta from another snapshot (self - other)
-    fn delta(&self, other: &InterruptSnapshot) -> InterruptDelta {
+    pub fn delta(&self, other: &InterruptSnapshot) -> InterruptDelta {
         let mut total = HashMap::new();
         let mut reschedule = HashMap::new();
         let mut function_call = HashMap::new();
@@ -145,16 +137,16 @@ impl InterruptSnapshot {
 
 /// Delta of interrupt counts between two snapshots
 #[derive(Debug)]
-struct InterruptDelta {
-    total: HashMap<usize, i64>,
-    reschedule: HashMap<usize, i64>,
-    function_call: HashMap<usize, i64>,
-    tlb: HashMap<usize, i64>,
+pub struct InterruptDelta {
+    pub total: HashMap<usize, i64>,
+    pub reschedule: HashMap<usize, i64>,
+    pub function_call: HashMap<usize, i64>,
+    pub tlb: HashMap<usize, i64>,
 }
 
 /// Different methods for generating IRQ load on the victim CPU
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IrqDisruptionMode {
+pub enum IrqDisruptionMode {
     /// No IRQ disruption - baseline measurement
     None,
     /// Use futex_wait/futex_wake to generate cross-core IPI wakeups
@@ -174,7 +166,7 @@ impl Default for IrqDisruptionMode {
 }
 
 /// Unified handle for any IRQ disruption strategy
-enum IrqDisruptionHandle {
+pub enum IrqDisruptionHandle {
     None,
     Futex(FutexIpiDisruptionHandle),
     Pmu(PmuIrqHandle),
@@ -187,7 +179,7 @@ enum IrqDisruptionHandle {
 }
 
 impl IrqDisruptionHandle {
-    fn stop(self) -> Result<IrqDisruptionStats> {
+    pub fn stop(self) -> Result<IrqDisruptionStats> {
         match self {
             IrqDisruptionHandle::None => Ok(IrqDisruptionStats::None),
             IrqDisruptionHandle::Futex(handle) => handle.stop(),
@@ -225,7 +217,7 @@ impl IrqDisruptionHandle {
 }
 
 /// Statistics from IRQ disruption
-enum IrqDisruptionStats {
+pub enum IrqDisruptionStats {
     None,
     Futex {
         wakeup_count: u64,
@@ -247,7 +239,7 @@ enum IrqDisruptionStats {
 }
 
 /// Handle for futex-based IPI disruption strategy
-struct FutexIpiDisruptionHandle {
+pub struct FutexIpiDisruptionHandle {
     waker_child: Child,
     receiver_child: Child,
     stop_signal: SharedBox<AtomicU32>,
@@ -260,7 +252,7 @@ struct FutexIpiDisruptionHandle {
 
 impl FutexIpiDisruptionHandle {
     /// Stop the IPI disruption and return stats
-    fn stop(self) -> Result<IrqDisruptionStats> {
+    pub fn stop(self) -> Result<IrqDisruptionStats> {
         self.stop_signal.store(1, Ordering::Release);
         std::thread::sleep(Duration::from_millis(100));
         drop(self.waker_child);
@@ -279,10 +271,10 @@ impl FutexIpiDisruptionHandle {
 ///
 /// The waker sends futex_wake() at irq_hz frequency to wake the receiver.
 /// Each futex_wake() should generate a cross-core IPI to wake the blocked receiver.
-fn launch_futex_ipi_disruption(
+pub fn launch_futex_ipi_disruption(
     allocator: std::sync::Arc<BumpAllocator>,
-    victim_cpu: &crate::util::system::Hyperthread,
-    waker_cpu: &crate::util::system::Hyperthread,
+    victim_cpu: &Hyperthread,
+    waker_cpu: &Hyperthread,
     start_signal: SharedBox<AtomicU32>,
     irq_hz: u64,
 ) -> Result<FutexIpiDisruptionHandle> {
@@ -458,7 +450,7 @@ fn launch_futex_ipi_disruption(
 }
 
 /// Handle for PMU-based IRQ disruption
-struct PmuIrqHandle {
+pub struct PmuIrqHandle {
     perf_child: Child,
     stop_signal: SharedBox<AtomicU32>,
     sample_count: SharedBox<AtomicU64>,
@@ -466,7 +458,7 @@ struct PmuIrqHandle {
 
 impl PmuIrqHandle {
     /// Stop the PMU disruption and return sample count
-    fn stop(self) -> Result<u64> {
+    pub fn stop(self) -> Result<u64> {
         self.stop_signal.store(1, Ordering::Release);
         std::thread::sleep(Duration::from_millis(100));
         drop(self.perf_child);
@@ -475,18 +467,18 @@ impl PmuIrqHandle {
 }
 
 /// Handle for timer-based IRQ disruption
-struct TimerIrqHandle {
+pub struct TimerIrqHandle {
     timer_child: Child,
     stop_signal: SharedBox<AtomicU32>,
     wakeup_count: SharedBox<AtomicU64>,
 }
 
 /// Number of parallel timers to create for maximum interrupt load
-const NUM_TIMERS: usize = 8;
+pub const NUM_TIMERS: usize = 8;
 
 impl TimerIrqHandle {
     /// Stop the timer disruption and return wakeup count
-    fn stop(self) -> Result<u64> {
+    pub fn stop(self) -> Result<u64> {
         self.stop_signal.store(1, Ordering::Release);
         std::thread::sleep(Duration::from_millis(100));
         drop(self.timer_child);
@@ -499,9 +491,9 @@ impl TimerIrqHandle {
 /// Creates NUM_TIMERS (8) separate POSIX timers using real-time signals
 /// to generate high-frequency timer interrupts. Real-time signals can be
 /// queued, allowing for much higher effective interrupt rates than SIGALRM.
-fn launch_timer_irq_disruption(
+pub fn launch_timer_irq_disruption(
     allocator: std::sync::Arc<BumpAllocator>,
-    victim_cpu: &crate::util::system::Hyperthread,
+    victim_cpu: &Hyperthread,
     start_signal: SharedBox<AtomicU32>,
     timer_hz: u64,
 ) -> Result<TimerIrqHandle> {
@@ -658,9 +650,9 @@ fn launch_timer_irq_disruption(
     })
 }
 
-/// Determine disruption mode from environment, defaulting to Combined.
+/// Determine disruption mode from environment, defaulting to Timer.
 /// Set SCHTEST_IRQ_MODE=none|futex|pmu|timer|combined to select mode.
-fn get_disruption_mode() -> IrqDisruptionMode {
+pub fn get_disruption_mode() -> IrqDisruptionMode {
     match std::env::var("SCHTEST_IRQ_MODE") {
         Ok(val) if val.eq_ignore_ascii_case("none") => IrqDisruptionMode::None,
         Ok(val) if val.eq_ignore_ascii_case("futex") => IrqDisruptionMode::Futex,
@@ -673,8 +665,8 @@ fn get_disruption_mode() -> IrqDisruptionMode {
             panic!(
                 "Invalid SCHTEST_IRQ_MODE value '{}'. Valid options: none, futex, pmu, timer, combined",
                 val
-                );
-        },
+            );
+        }
         Err(oth) => {
             panic!("Error reading SCHTEST_IRQ_MODE: {}", oth);
         }
@@ -683,7 +675,7 @@ fn get_disruption_mode() -> IrqDisruptionMode {
 
 /// Get test duration from environment variable SCHTEST_IRQ_DURATION (in seconds).
 /// Defaults to 10 seconds if not set or invalid.
-fn get_test_duration() -> Duration {
+pub fn get_test_duration() -> Duration {
     match std::env::var("SCHTEST_IRQ_DURATION") {
         Ok(val) => match val.parse::<u64>() {
             Ok(secs) if secs > 0 => Duration::from_secs(secs),
@@ -700,7 +692,7 @@ fn get_test_duration() -> Duration {
 }
 
 /// Read the kernel's maximum allowed perf sample rate
-fn get_max_perf_sample_rate() -> Result<u64> {
+pub fn get_max_perf_sample_rate() -> Result<u64> {
     let rate_str = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
         .context("Failed to read perf_event_max_sample_rate")?;
     rate_str
@@ -710,7 +702,7 @@ fn get_max_perf_sample_rate() -> Result<u64> {
 }
 
 /// Detect and report scheduler information
-fn log_scheduler_info() {
+pub fn log_scheduler_info() {
     fn read_sysfs(path: &str) -> Option<String> {
         std::fs::read_to_string(path)
             .ok()
@@ -751,7 +743,7 @@ fn log_scheduler_info() {
 }
 
 /// Log relevant perf sysctls to aid debugging PMU sampling behavior.
-fn log_perf_sysctls() {
+pub fn log_perf_sysctls() {
     fn read_sysctl(path: &str) -> Option<String> {
         std::fs::read_to_string(path)
             .ok()
@@ -774,9 +766,9 @@ fn log_perf_sysctls() {
 ///
 /// Uses perf_event_open to configure high-frequency PMU sampling on the victim CPU.
 /// PMIs (Performance Monitoring Interrupts) are delivered as NMI-like interrupts.
-fn launch_pmu_irq_disruption(
+pub fn launch_pmu_irq_disruption(
     allocator: std::sync::Arc<BumpAllocator>,
-    victim_cpu: &crate::util::system::Hyperthread,
+    victim_cpu: &Hyperthread,
     start_signal: SharedBox<AtomicU32>,
     target_freq_hz: u64,
 ) -> Result<PmuIrqHandle> {
@@ -926,21 +918,26 @@ fn launch_pmu_irq_disruption(
     })
 }
 
+/// Default IRQ frequency for timer-based disruption (140kHz - kernel max for hrtimer)
+pub const DEFAULT_IRQ_HZ: u64 = 140 * 1000;
+
 /// Helper function to launch a CPU hog and add it to a cgroup
-fn launch_cgroup_hog(
+pub fn launch_cgroup_hog(
     _cpu_id: i32,
-    cpu_ht: &crate::util::system::Hyperthread,
+    cpu_ht: &Hyperthread,
     cgroup_name: &str,
     worker_name: &str,
     hog_duration: Duration,
     start_signal: SharedBox<AtomicU32>,
     bogo_ops_out: SharedBox<AtomicU64>,
     scheduled_ns_out: SharedBox<AtomicU64>,
-) -> Result<Child> {
+) -> Result<crate::util::child::Child> {
+    use crate::workloads::spinner_utilization;
+
     let cpu_mask = CPUMask::new(cpu_ht);
     let name = worker_name.to_string();
 
-    let child = Child::run(
+    let child = crate::util::child::Child::run(
         move || {
             cpu_mask.run(|| {
                 spinner_utilization::cpu_hog_workload(
@@ -966,576 +963,3 @@ fn launch_cgroup_hog(
 
     Ok(child)
 }
-
-/// Test IRQ disruption impact on cgroup cpu.max fairness.
-///
-/// This test creates two CPU hogs on CPU 1 and CPU 2, both limited to by cpu.max.
-/// Additionally, PMU sampling generates high-frequency PMIs (Performance Monitoring
-/// Interrupts) on CPU 1 (victim) at IRQ_HZ frequency. PMIs are NMI-like interrupts
-/// that preempt almost everything, simulating heavy IRQ load.
-fn irq_disruption_targeted() -> Result<()> {
-    const CPU_1: i32 = 1;
-    const CPU_2: i32 = 2;
-    const WAKER_CPU: i32 = 0; // Only used for Futex mode
-    const CPU_MAX_PERCENT: f64 = 50.0;
-    const IRQ_HZ: u64 = 140 * 1000; // 140kHz - kernel max for hrtimer
-    let disruption_mode: IrqDisruptionMode = get_disruption_mode();
-
-    let system = System::load()?;
-
-    // Collect all hyperthreads (logical CPUs)
-    let mut all_cpus = Vec::new();
-    for core in system.cores() {
-        for ht in core.hyperthreads() {
-            all_cpus.push(ht.clone());
-        }
-    }
-
-    eprintln!("Found {} logical CPUs", all_cpus.len());
-    eprintln!("Testing IRQ disruption impact on cpu.max fairness:");
-    eprintln!(
-        "  CPU {} and CPU {} both limited to {}%",
-        CPU_1, CPU_2, CPU_MAX_PERCENT
-    );
-    match disruption_mode {
-        IrqDisruptionMode::None => {
-            eprintln!("  NO IRQ disruption - baseline measurement");
-        }
-        IrqDisruptionMode::Futex => {
-            eprintln!(
-                "  Futex-based IPI disruption: Waker on CPU {} -> Receiver on CPU {} at {} Hz",
-                WAKER_CPU, CPU_1, IRQ_HZ
-            );
-        }
-        IrqDisruptionMode::Pmu => {
-            eprintln!(
-                "  PMU sampling on CPU {} at {} Hz (PMI interrupts)",
-                CPU_1, IRQ_HZ
-            );
-        }
-        IrqDisruptionMode::Timer => {
-            eprintln!("  Timer interrupts on CPU {} at {} Hz x {} timers = {} Hz effective", CPU_1, IRQ_HZ, NUM_TIMERS, IRQ_HZ * NUM_TIMERS as u64);
-        }
-        IrqDisruptionMode::Combined => {
-            eprintln!("  COMBINED mode: PMU sampling + Futex IPI + Timer interrupts");
-            eprintln!("    PMU: CPU {} at {} Hz (PMI interrupts)", CPU_1, IRQ_HZ);
-            eprintln!(
-                "    Futex: Waker on CPU {} -> Receiver on CPU {} at {} Hz",
-                WAKER_CPU, CPU_1, IRQ_HZ
-            );
-            eprintln!("    Timer: CPU {} at {} Hz x {} timers", CPU_1, IRQ_HZ, NUM_TIMERS);
-        }
-    }
-
-    // Log scheduler and perf information
-    log_scheduler_info();
-    log_perf_sysctls();
-
-    // Find the CPUs
-    let cpu_1_ht = all_cpus
-        .iter()
-        .find(|ht| ht.id() == CPU_1)
-        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", CPU_1))?
-        .clone();
-
-    let cpu_2_ht = all_cpus
-        .iter()
-        .find(|ht| ht.id() == CPU_2)
-        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", CPU_2))?
-        .clone();
-
-    let waker_ht = all_cpus
-        .iter()
-        .find(|ht| ht.id() == WAKER_CPU)
-        .ok_or_else(|| anyhow::anyhow!("CPU {} not found", WAKER_CPU))?
-        .clone();
-
-    // Create shared memory for start signal and counters
-    let allocator = BumpAllocator::new("cpu_max_test", 2 * 1024 * 1024)?;
-    let start_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
-
-    // Create counters for both CPUs
-    let bogo_ops_cpu1 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
-    let scheduled_ns_cpu1 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
-    let bogo_ops_cpu2 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
-    let scheduled_ns_cpu2 = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
-
-    // Create cgroups with cpu.max limits
-    let period_us = 100000u64; // 100ms period
-    let quota_us = (period_us as f64 * CPU_MAX_PERCENT / 100.0) as i64;
-
-    eprintln!(
-        "\nCreating cgroups with cpu.max={}/{} ({}%)",
-        quota_us, period_us, CPU_MAX_PERCENT
-    );
-
-    let cgroup_cpu1 = CgroupBuilder::new("schtest_cpu_max_cpu1")
-        .cpu()
-        .quota(quota_us)
-        .period(period_us)
-        .done()
-        .build(hierarchies::auto())
-        .context("Failed to create cgroup for CPU 1")?;
-
-    let cgroup_cpu2 = CgroupBuilder::new("schtest_cpu_max_cpu2")
-        .cpu()
-        .quota(quota_us)
-        .period(period_us)
-        .done()
-        .build(hierarchies::auto())
-        .context("Failed to create cgroup for CPU 2")?;
-
-    // Capture interrupt counts before the test
-    eprintln!("\nCapturing interrupt baseline...");
-    let interrupts_before = InterruptSnapshot::capture()?;
-
-    // Launch IRQ disruption based on selected mode
-    let irq_handle = match disruption_mode {
-        IrqDisruptionMode::None => {
-            eprintln!("\nSkipping IRQ disruption (baseline mode)");
-            IrqDisruptionHandle::None
-        }
-        IrqDisruptionMode::Futex => {
-            eprintln!("\nLaunching IRQ disruption...");
-            eprintln!(
-                "  Futex mode: Receiver on CPU {}, Waker on CPU {} at {} Hz",
-                CPU_1, WAKER_CPU, IRQ_HZ
-            );
-            let handle = launch_futex_ipi_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                &waker_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            IrqDisruptionHandle::Futex(handle)
-        }
-        IrqDisruptionMode::Pmu => {
-            eprintln!("\nLaunching IRQ disruption...");
-            eprintln!("  PMU mode: Sampling on CPU {} at {} Hz", CPU_1, IRQ_HZ);
-            let handle = launch_pmu_irq_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            IrqDisruptionHandle::Pmu(handle)
-        }
-        IrqDisruptionMode::Combined => {
-            eprintln!("\nLaunching IRQ disruption...");
-            eprintln!("  Combined mode: Launching both PMU and Futex...");
-            let pmu_handle = launch_pmu_irq_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            let futex_handle = launch_futex_ipi_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                &waker_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            let timer_handle = launch_timer_irq_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            IrqDisruptionHandle::Combined {
-                futex: futex_handle,
-                pmu: pmu_handle,
-                timer: timer_handle,
-            }
-        }
-        IrqDisruptionMode::Timer => {
-            eprintln!("\nLaunching IRQ disruption...");
-            eprintln!("  Timer mode: {} timers on CPU {} at {} Hz each", NUM_TIMERS, CPU_1, IRQ_HZ);
-            let handle = launch_timer_irq_disruption(
-                allocator.clone(),
-                &cpu_1_ht,
-                start_signal.clone(),
-                IRQ_HZ,
-            )?;
-            IrqDisruptionHandle::Timer(handle)
-        }
-    };
-
-    let hog_duration = get_test_duration();
-    eprintln!("\nLaunching 2 CPU hogs for {:?}...", hog_duration);
-
-    // Launch hog on CPU 1 (victim - receives IPIs)
-    let mut child_cpu1 = launch_cgroup_hog(
-        CPU_1,
-        &cpu_1_ht,
-        "schtest_cpu_max_cpu1",
-        "victim",
-        hog_duration,
-        start_signal.clone(),
-        bogo_ops_cpu1.clone(),
-        scheduled_ns_cpu1.clone(),
-    )?;
-
-    // Launch hog on CPU 2 (control - no IPI load)
-    let mut child_cpu2 = launch_cgroup_hog(
-        CPU_2,
-        &cpu_2_ht,
-        "schtest_cpu_max_cpu2",
-        "control",
-        hog_duration,
-        start_signal.clone(),
-        bogo_ops_cpu2.clone(),
-        scheduled_ns_cpu2.clone(),
-    )?;
-
-    // Give all threads a moment to initialize
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Signal all threads to start simultaneously
-    eprintln!("Signaling all threads to START");
-    start_signal.store(1, Ordering::Release);
-
-    // Wait for both hogs to complete
-    eprintln!("Waiting for hogs to complete...");
-    if let Some(result) = child_cpu1.wait(true, false) {
-        result.context(format!("Hog on CPU {} failed", CPU_1))?;
-    }
-    if let Some(result) = child_cpu2.wait(true, false) {
-        result.context(format!("Hog on CPU {} failed", CPU_2))?;
-    }
-    eprintln!("Both hogs completed successfully");
-
-    // Stop IRQ disruption
-    eprintln!("Stopping IRQ disruption...");
-    let stats = irq_handle.stop()?;
-
-    // Capture interrupt counts after the test
-    let interrupts_after = InterruptSnapshot::capture()?;
-    let interrupt_delta = interrupts_after.delta(&interrupts_before);
-
-    // Report stats based on mode
-    match stats {
-        IrqDisruptionStats::None => {
-            eprintln!("\n=== No IRQ Disruption (Baseline) ===");
-            eprintln!("No artificial IRQ load applied");
-        }
-        IrqDisruptionStats::Futex {
-            wakeup_count,
-            futex_wait_calls,
-            futex_wait_blocks,
-            futex_wait_eagain,
-        } => {
-            eprintln!("\n=== Futex IPI Disruption Stats ===");
-            eprintln!("Waker sent {} wakeups total", wakeup_count);
-            eprintln!("Receiver futex_wait calls:  {}", futex_wait_calls);
-            eprintln!("  Actual blocks:             {}", futex_wait_blocks);
-            eprintln!("  EAGAIN returns:            {}", futex_wait_eagain);
-
-            let block_pct = if futex_wait_calls > 0 {
-                (futex_wait_blocks as f64 / futex_wait_calls as f64) * 100.0
-            } else {
-                0.0
-            };
-            eprintln!("  Block rate:                {:.2}%", block_pct);
-        }
-        IrqDisruptionStats::Pmu => {
-            eprintln!("\n=== PMU Disruption Stats ===");
-            eprintln!("PMU sampling configured at {} Hz on CPU {}", IRQ_HZ, CPU_1);
-            eprintln!("(PMIs delivered as NMI-like interrupts throughout test)");
-        }
-        IrqDisruptionStats::Timer { timer_wakeups } => {
-            eprintln!("\n=== Timer Disruption Stats ===");
-            eprintln!(
-                "Timer: {} wakeups total at {} Hz x {} timers = {} Hz effective on CPU {}",
-                timer_wakeups, IRQ_HZ, NUM_TIMERS, IRQ_HZ * NUM_TIMERS as u64, CPU_1
-            );
-        }
-        IrqDisruptionStats::Combined {
-            wakeup_count,
-            futex_wait_calls,
-            futex_wait_blocks,
-            futex_wait_eagain,
-            timer_wakeups,
-        } => {
-            eprintln!("\n=== COMBINED Disruption Stats ===");
-            eprintln!("PMU: Sampling configured at {} Hz on CPU {}", IRQ_HZ, CPU_1);
-            eprintln!("     (PMIs delivered as NMI-like interrupts throughout test)");
-            eprintln!("\nFutex: Waker sent {} wakeups total", wakeup_count);
-            eprintln!("  Receiver futex_wait calls:  {}", futex_wait_calls);
-            eprintln!("    Actual blocks:             {}", futex_wait_blocks);
-            eprintln!("    EAGAIN returns:            {}", futex_wait_eagain);
-
-            let block_pct = if futex_wait_calls > 0 {
-                (futex_wait_blocks as f64 / futex_wait_calls as f64) * 100.0
-            } else {
-                0.0
-            };
-            eprintln!("    Block rate:                {:.2}%", block_pct);
-            eprintln!("\nTimer: {} wakeups total ({} timers at {} Hz each)", timer_wakeups, NUM_TIMERS, IRQ_HZ);
-        }
-    }
-
-    // Report interrupt deltas per CPU
-    eprintln!("\n=== Interrupt Counts (Delta During Test) ===");
-    eprintln!(
-        "{:>6} {:>15} {:>15} {:>15} {:>15}",
-        "CPU", "Total", "Reschedule", "Func Call", "TLB"
-    );
-
-    // Collect key CPUs
-    let key_cpus = vec![
-        (WAKER_CPU as usize, "WAKER"),
-        (CPU_1 as usize, "VICTIM"),
-        (CPU_2 as usize, "CONTROL"),
-    ];
-
-    for (cpu, label) in &key_cpus {
-        let total = *interrupt_delta.total.get(cpu).unwrap_or(&0);
-        let reschedule = *interrupt_delta.reschedule.get(cpu).unwrap_or(&0);
-        let function_call = *interrupt_delta.function_call.get(cpu).unwrap_or(&0);
-        let tlb = *interrupt_delta.tlb.get(cpu).unwrap_or(&0);
-
-        eprintln!(
-            "{:>6} {:>15} {:>15} {:>15} {:>15}  <-- {}",
-            cpu, total, reschedule, function_call, tlb, label
-        );
-    }
-
-    // Calculate IPI totals (reschedule + function_call + tlb)
-    let victim_total = *interrupt_delta.total.get(&(CPU_1 as usize)).unwrap_or(&0);
-    let victim_ipis = *interrupt_delta
-        .reschedule
-        .get(&(CPU_1 as usize))
-        .unwrap_or(&0)
-        + *interrupt_delta
-            .function_call
-            .get(&(CPU_1 as usize))
-            .unwrap_or(&0)
-        + *interrupt_delta.tlb.get(&(CPU_1 as usize)).unwrap_or(&0);
-
-    let control_total = *interrupt_delta.total.get(&(CPU_2 as usize)).unwrap_or(&0);
-    let control_ipis = *interrupt_delta
-        .reschedule
-        .get(&(CPU_2 as usize))
-        .unwrap_or(&0)
-        + *interrupt_delta
-            .function_call
-            .get(&(CPU_2 as usize))
-            .unwrap_or(&0)
-        + *interrupt_delta.tlb.get(&(CPU_2 as usize)).unwrap_or(&0);
-
-    eprintln!("\nInterrupt Summary:");
-    eprintln!(
-        "  Victim CPU {} total interrupts: {} (IPIs: {})",
-        CPU_1, victim_total, victim_ipis
-    );
-    eprintln!(
-        "  Control CPU {} total interrupts: {} (IPIs: {})",
-        CPU_2, control_total, control_ipis
-    );
-
-    if victim_ipis > control_ipis * 2 {
-        eprintln!(
-            "  ✓ Victim CPU has {}x more IPIs than control",
-            victim_ipis / control_ipis.max(1)
-        );
-    } else {
-        eprintln!(
-            "  ⚠ Victim CPU IPI rate similar to control (ratio: {:.2}x)",
-            victim_ipis as f64 / control_ipis.max(1) as f64
-        );
-    }
-
-    // Clean up cgroups
-    drop(cgroup_cpu1);
-    drop(cgroup_cpu2);
-
-    // Collect results
-    let results: Vec<(i32, u64, u64)> = vec![
-        (
-            CPU_1,
-            bogo_ops_cpu1.load(Ordering::Acquire),
-            scheduled_ns_cpu1.load(Ordering::Acquire),
-        ),
-        (
-            CPU_2,
-            bogo_ops_cpu2.load(Ordering::Acquire),
-            scheduled_ns_cpu2.load(Ordering::Acquire),
-        ),
-    ];
-
-    // Calculate statistics
-    let bogo_ops_results: Vec<(i32, u64)> =
-        results.iter().map(|(cpu, ops, _)| (*cpu, *ops)).collect();
-    let scheduled_ns_results: Vec<(i32, u64)> =
-        results.iter().map(|(cpu, _, ns)| (*cpu, *ns)).collect();
-
-    // Bogo ops statistics
-    let mut bogo_ops_only: Vec<u64> = bogo_ops_results.iter().map(|(_, ops)| *ops).collect();
-    bogo_ops_only.sort_unstable();
-
-    let min_bogo_ops = bogo_ops_only[0];
-    let max_bogo_ops = bogo_ops_only[1];
-    let avg_bogo_ops = (min_bogo_ops + max_bogo_ops) / 2;
-    let p50_bogo_ops = avg_bogo_ops;
-    let bogo_ops_skew = max_bogo_ops - min_bogo_ops;
-    let bogo_ops_skew_pct = if max_bogo_ops > 0 {
-        (bogo_ops_skew as f64 / max_bogo_ops as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let (min_bogo_cpu, _) = bogo_ops_results.iter().min_by_key(|(_, ops)| ops).unwrap();
-    let (max_bogo_cpu, _) = bogo_ops_results.iter().max_by_key(|(_, ops)| ops).unwrap();
-    let p50_bogo_cpu = *min_bogo_cpu;
-
-    // Scheduled nanoseconds statistics
-    let mut scheduled_ns_only: Vec<u64> = scheduled_ns_results.iter().map(|(_, ns)| *ns).collect();
-    scheduled_ns_only.sort_unstable();
-
-    let min_scheduled_ns = scheduled_ns_only[0];
-    let max_scheduled_ns = scheduled_ns_only[1];
-    let avg_scheduled_ns = (min_scheduled_ns + max_scheduled_ns) / 2;
-    let p50_scheduled_ns = avg_scheduled_ns;
-    let scheduled_ns_skew = max_scheduled_ns - min_scheduled_ns;
-    let scheduled_ns_skew_pct = if max_scheduled_ns > 0 {
-        (scheduled_ns_skew as f64 / max_scheduled_ns as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let (min_ns_cpu, _) = scheduled_ns_results
-        .iter()
-        .min_by_key(|(_, ns)| ns)
-        .unwrap();
-    let (max_ns_cpu, _) = scheduled_ns_results
-        .iter()
-        .max_by_key(|(_, ns)| ns)
-        .unwrap();
-    let p50_ns_cpu = *min_ns_cpu;
-
-    // Bogo ops per millisecond
-    let bogo_ops_per_ms: Vec<(i32, f64)> = results
-        .iter()
-        .map(|(cpu, ops, ns)| {
-            let ms = *ns as f64 / 1_000_000.0;
-            let ops_per_ms = if ms > 0.0 { *ops as f64 / ms } else { 0.0 };
-            (*cpu, ops_per_ms)
-        })
-        .collect();
-
-    let mut ops_per_ms_only: Vec<f64> = bogo_ops_per_ms.iter().map(|(_, rate)| *rate).collect();
-    ops_per_ms_only.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let min_ops_per_ms = ops_per_ms_only[0];
-    let max_ops_per_ms = ops_per_ms_only[1];
-    let avg_ops_per_ms = (min_ops_per_ms + max_ops_per_ms) / 2.0;
-    let p50_ops_per_ms = avg_ops_per_ms;
-    let ops_per_ms_skew = max_ops_per_ms - min_ops_per_ms;
-    let ops_per_ms_skew_pct = if max_ops_per_ms > 0.0 {
-        (ops_per_ms_skew / max_ops_per_ms) * 100.0
-    } else {
-        0.0
-    };
-
-    let (min_ops_ms_cpu, _) = bogo_ops_per_ms
-        .iter()
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .unwrap();
-    let (max_ops_ms_cpu, _) = bogo_ops_per_ms
-        .iter()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .unwrap();
-    let p50_ops_ms_cpu = *min_ops_ms_cpu;
-
-    // Print detailed results
-    eprintln!("\n=== Per-CPU Results ===");
-    eprintln!(
-        "{:>6} {:>20} {:>20} {:>20}",
-        "CPU", "bogo_ops", "scheduled_ns", "bogo_ops/ms"
-    );
-    for (cpu, ops, ns) in &results {
-        let ops_per_ms = bogo_ops_per_ms
-            .iter()
-            .find(|(id, _)| id == cpu)
-            .map(|(_, rate)| *rate)
-            .unwrap_or(0.0);
-        let marker = if *cpu == CPU_1 {
-            " <-- VICTIM (IPI load)"
-        } else {
-            " <-- CONTROL"
-        };
-        eprintln!(
-            "{:>6} {:>20} {:>20} {:>20.2}{}",
-            cpu, ops, ns, ops_per_ms, marker
-        );
-    }
-
-    eprintln!("\n=== Bogo Ops Statistics, Per Core ===");
-    eprintln!("Min:       {:>20} (CPU {})", min_bogo_ops, min_bogo_cpu);
-    eprintln!("Avg:       {:>20}", avg_bogo_ops);
-    eprintln!("P50:       {:>20} (CPU {})", p50_bogo_ops, p50_bogo_cpu);
-    eprintln!("Max:       {:>20} (CPU {})", max_bogo_ops, max_bogo_cpu);
-    eprintln!(
-        "Max Skew:  {:>20} ({:.2}%)",
-        bogo_ops_skew, bogo_ops_skew_pct
-    );
-
-    eprintln!("\n=== Scheduled Time (ns) Statistics, Per Core ===");
-    eprintln!("Min:       {:>20} (CPU {})", min_scheduled_ns, min_ns_cpu);
-    eprintln!("Avg:       {:>20}", avg_scheduled_ns);
-    eprintln!("P50:       {:>20} (CPU {})", p50_scheduled_ns, p50_ns_cpu);
-    eprintln!("Max:       {:>20} (CPU {})", max_scheduled_ns, max_ns_cpu);
-    eprintln!(
-        "Max Skew:  {:>20} ({:.2}%)",
-        scheduled_ns_skew, scheduled_ns_skew_pct
-    );
-
-    eprintln!("\n=== Bogo Ops/ms Statistics, Per Core ===");
-    eprintln!(
-        "Min:       {:>20.2} (CPU {})",
-        min_ops_per_ms, min_ops_ms_cpu
-    );
-    eprintln!("Avg:       {:>20.2}", avg_ops_per_ms);
-    eprintln!(
-        "P50:       {:>20.2} (CPU {})",
-        p50_ops_per_ms, p50_ops_ms_cpu
-    );
-    eprintln!(
-        "Max:       {:>20.2} (CPU {})",
-        max_ops_per_ms, max_ops_ms_cpu
-    );
-    eprintln!(
-        "Max Skew:  {:>20.2} ({:.2}%)",
-        ops_per_ms_skew, ops_per_ms_skew_pct
-    );
-
-    // Assert that CPU 1 (victim) has lower bogo_ops than CPU 2 (control)
-    if bogo_ops_results
-        .iter()
-        .find(|(cpu, _)| *cpu == CPU_1)
-        .unwrap()
-        .1
-        >= bogo_ops_results
-            .iter()
-            .find(|(cpu, _)| *cpu == CPU_2)
-            .unwrap()
-            .1
-    {
-        eprintln!(
-            "\n⚠ WARNING: Victim CPU {} did not have lower bogo_ops than control CPU {}",
-            CPU_1, CPU_2
-        );
-        eprintln!("   This suggests the interrupt disruption strategy may not be working as expected.");
-    } else {
-        eprintln!(
-            "\n✓ Victim CPU {} has lower bogo_ops than control CPU {} (interrupt impact detected)",
-            CPU_1, CPU_2
-        );
-    }
-
-    Ok(())
-}
-
-test!("irq_disruption_targeted", irq_disruption_targeted);

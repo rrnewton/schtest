@@ -106,7 +106,9 @@ macro_rules! benchmark {
 pub mod basic;
 pub mod cgroup_tree;
 pub mod fairness;
-pub mod irq;
+pub mod irq_accounting;
+pub mod irq_common;
+pub mod irq_migration;
 pub mod latency;
 pub mod topology;
 
