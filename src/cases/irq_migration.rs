@@ -74,7 +74,7 @@ fn irq_migration_test() -> Result<()> {
         }
         // Skip the reserved tracing core if set
         if let Some(reserved_cpu) = reserved_tracing_cpu {
-            if first_ht.id() == reserved_cpu {
+            if first_ht.id() == reserved_cpu as i32 {
                 continue;
             }
         }

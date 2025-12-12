@@ -691,6 +691,25 @@ pub fn get_test_duration() -> Duration {
     }
 }
 
+/// Get the reserved tracing core from environment variable SCHTEST_IRQ_RESERVE_TRACING_CORE.
+/// Returns None if not set or invalid. When set, this CPU will not receive IRQ disruption,
+/// allowing a tracer (e.g., wprof) to run on it without interference.
+pub fn get_reserved_tracing_core() -> Option<usize> {
+    match std::env::var("SCHTEST_IRQ_RESERVE_TRACING_CORE") {
+        Ok(val) => match val.parse::<usize>() {
+            Ok(cpu) => Some(cpu),
+            Err(_) => {
+                eprintln!(
+                    "Warning: SCHTEST_IRQ_RESERVE_TRACING_CORE='{}' is not a valid CPU ID",
+                    val
+                );
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
 /// Read the kernel's maximum allowed perf sample rate
 pub fn get_max_perf_sample_rate() -> Result<u64> {
     let rate_str = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
