@@ -15,6 +15,9 @@
 //! # Environment Variables
 //!
 //! - `SCHTEST_IRQ_DURATION`: Test duration in seconds. Defaults to `10`.
+//! - `SCHTEST_IRQ_RESERVE_TRACING_CORE`: CPU ID to reserve from IRQ storm for tracing
+//!   (e.g., for wprof). When set, this CPU will not receive IRQ disruption, allowing
+//!   a tracer to run on it without interference.
 
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -28,8 +31,8 @@ use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
 use super::irq_common::{
-    get_test_duration, launch_timer_irq_disruption, log_scheduler_info, InterruptSnapshot,
-    TimerIrqHandle, DEFAULT_IRQ_HZ, NUM_TIMERS,
+    get_reserved_tracing_core, get_test_duration, launch_timer_irq_disruption, log_scheduler_info,
+    InterruptSnapshot, TimerIrqHandle, DEFAULT_IRQ_HZ, NUM_TIMERS,
 };
 
 /// Test whether the scheduler migrates a task from IRQ-heavy CPUs to a quiet CPU.
@@ -58,6 +61,9 @@ fn irq_migration_test() -> Result<()> {
     let initial_victim_cpu = initial_victim_core.hyperthreads().first().unwrap().clone();
     let initial_victim_cpu_id = initial_victim_cpu.id();
 
+    // Check if a CPU should be reserved for tracing (e.g., for wprof)
+    let reserved_tracing_cpu = get_reserved_tracing_core();
+
     // Collect all victim CPUs (one hyperthread per physical core, excluding control core)
     let mut victim_cpus = Vec::new();
     for core in &cores {
@@ -66,6 +72,12 @@ fn irq_migration_test() -> Result<()> {
         if first_ht.id() == control_cpu_id {
             continue;
         }
+        // Skip the reserved tracing core if set
+        if let Some(reserved_cpu) = reserved_tracing_cpu {
+            if first_ht.id() == reserved_cpu {
+                continue;
+            }
+        }
         // Only use the first hyperthread of each physical core
         victim_cpus.push(first_ht.clone());
     }
@@ -73,9 +85,13 @@ fn irq_migration_test() -> Result<()> {
     eprintln!("=== IRQ Migration Test ===");
     eprintln!("Physical cores: {}", cores.len());
     eprintln!("Control CPU: {} (no IRQ load)", control_cpu_id);
+    if let Some(reserved_cpu) = reserved_tracing_cpu {
+        eprintln!("Reserved tracing CPU: {} (no IRQ load)", reserved_cpu);
+    }
     eprintln!(
-        "Victim CPUs: {} (one per physical core, excluding control)",
-        victim_cpus.len()
+        "Victim CPUs: {} (one per physical core, excluding control{})",
+        victim_cpus.len(),
+        if reserved_tracing_cpu.is_some() { " and tracing" } else { "" }
     );
     eprintln!("Initial worker CPU: {} (will be unpinned)", initial_victim_cpu_id);
     eprintln!(
