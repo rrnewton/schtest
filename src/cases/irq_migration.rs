@@ -51,8 +51,9 @@ fn irq_migration_test() -> Result<()> {
         anyhow::bail!("Need at least 2 physical cores for this test");
     }
 
-    // Pick control core (last physical core) and its first hyperthread
+    // Pick control core (last physical core) - we'll leave ALL its hyperthreads quiet
     let control_core = &cores[cores.len() - 1];
+    let control_core_id = control_core.id();
     let control_cpu = control_core.hyperthreads().first().unwrap().clone();
     let control_cpu_id = control_cpu.id();
 
@@ -64,32 +65,35 @@ fn irq_migration_test() -> Result<()> {
     // Check if a CPU should be reserved for tracing (e.g., for wprof)
     let reserved_tracing_cpu = get_reserved_tracing_core();
 
-    // Collect all victim CPUs (one hyperthread per physical core, excluding control core)
+    // Collect all victim CPUs: ALL hyperthreads of each core, excluding control core
+    // This ensures we stress both hyperthreads so the task can't escape to a sibling
     let mut victim_cpus = Vec::new();
     for core in &cores {
-        // Skip the control core entirely
-        let first_ht = core.hyperthreads().first().unwrap();
-        if first_ht.id() == control_cpu_id {
+        // Skip the control core entirely (all its hyperthreads)
+        if core.id() == control_core_id {
             continue;
         }
-        // Skip the reserved tracing core if set
-        if let Some(reserved_cpu) = reserved_tracing_cpu {
-            if first_ht.id() == reserved_cpu as i32 {
-                continue;
+        // Add ALL hyperthreads of this core
+        for ht in core.hyperthreads() {
+            // Skip the reserved tracing core if set
+            if let Some(reserved_cpu) = reserved_tracing_cpu {
+                if ht.id() == reserved_cpu as i32 {
+                    continue;
+                }
             }
+            victim_cpus.push(ht.clone());
         }
-        // Only use the first hyperthread of each physical core
-        victim_cpus.push(first_ht.clone());
     }
 
     eprintln!("=== IRQ Migration Test ===");
     eprintln!("Physical cores: {}", cores.len());
-    eprintln!("Control CPU: {} (no IRQ load)", control_cpu_id);
+    eprintln!("Control core: {} (all hyperthreads quiet)", control_core_id);
+    eprintln!("Control CPUs: {:?}", control_core.hyperthreads().iter().map(|h| h.id()).collect::<Vec<_>>());
     if let Some(reserved_cpu) = reserved_tracing_cpu {
         eprintln!("Reserved tracing CPU: {} (no IRQ load)", reserved_cpu);
     }
     eprintln!(
-        "Victim CPUs: {} (one per physical core, excluding control{})",
+        "Victim CPUs: {} (all hyperthreads, excluding control core{})",
         victim_cpus.len(),
         if reserved_tracing_cpu.is_some() { " and tracing" } else { "" }
     );
@@ -142,6 +146,12 @@ fn irq_migration_test() -> Result<()> {
 
     let mut worker = Child::run(
         move || {
+            // Set thread name for easy identification in traces (e.g., Perfetto)
+            unsafe {
+                let name = std::ffi::CString::new("stress_worker").unwrap();
+                libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+            }
+
             // Start pinned to initial victim
             initial_mask.run(|| {
                 // Wait for start signal

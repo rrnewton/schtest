@@ -473,8 +473,8 @@ pub struct TimerIrqHandle {
     wakeup_count: SharedBox<AtomicU64>,
 }
 
-/// Number of parallel timers to create for maximum interrupt load
-pub const NUM_TIMERS: usize = 8;
+/// Number of parallel timers to create for interrupt load per CPU
+pub const NUM_TIMERS: usize = 4;
 
 impl TimerIrqHandle {
     /// Stop the timer disruption and return wakeup count

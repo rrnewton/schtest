@@ -228,10 +228,12 @@ def run_single_trial(
         # Calculate wprof duration: test duration + buffer (in ms)
         wprof_duration_ms = (duration + 5) * 1000
 
+        # Use timestamp in trace filename to avoid overwrites
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if trace_output_dir:
-            trace_file = trace_output_dir / f"trace_trial{trial_num:02d}.pb"
+            trace_file = trace_output_dir / f"trace_{timestamp}_trial{trial_num:02d}.pb"
         else:
-            trace_file = Path(f"trace_trial{trial_num:02d}.pb")
+            trace_file = Path(f"trace_{timestamp}_trial{trial_num:02d}.pb")
 
         try:
             wprof_proc = start_wprof(wprof_cpu, wprof_duration_ms, trace_file)
