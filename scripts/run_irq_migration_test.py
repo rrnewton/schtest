@@ -263,8 +263,8 @@ class SchedulerManager:
             "\n".join(f"  - {p}" for p in searched)
         )
 
-    def start(self):
-        """Start the scheduler."""
+    def start(self, timeout: float = 10.0):
+        """Start the scheduler and wait for it to enable sched_ext."""
         args = self.SCHEDULER_ARGS.get(self.scheduler_name, [])
         cmd = ["sudo", str(self.scheduler_path)] + args
 
@@ -277,20 +277,27 @@ class SchedulerManager:
             text=True,
         )
 
-        # Wait for scheduler to initialize
-        time.sleep(1.0)
+        # Poll for scheduler to enable sched_ext
+        start_time = time.time()
+        poll_interval = 0.1
+        while time.time() - start_time < timeout:
+            # Check if process died
+            if self.process.poll() is not None:
+                stdout = self.process.stdout.read()
+                stderr = self.process.stderr.read()
+                raise RuntimeError(f"Scheduler exited prematurely:\nstdout: {stdout}\nstderr: {stderr}")
 
-        if self.process.poll() is not None:
-            stdout = self.process.stdout.read()
-            stderr = self.process.stderr.read()
-            raise RuntimeError(f"Scheduler exited prematurely:\nstdout: {stdout}\nstderr: {stderr}")
+            # Check if sched_ext is enabled
+            state, ops = get_sched_ext_state()
+            if state == "enabled":
+                print(f"  Scheduler {ops} running (PID {self.process.pid})")
+                return
 
-        # Verify sched_ext is enabled
-        state, ops = get_sched_ext_state()
-        if state != "enabled":
-            raise RuntimeError(f"Scheduler failed to enable sched_ext (state: {state})")
+            time.sleep(poll_interval)
 
-        print(f"  Scheduler {ops} running (PID {self.process.pid})")
+        # Timeout - scheduler didn't enable in time
+        state, _ = get_sched_ext_state()
+        raise RuntimeError(f"Scheduler failed to enable sched_ext within {timeout}s (state: {state})")
 
     def is_alive(self) -> bool:
         """Check if the scheduler process is still running."""
