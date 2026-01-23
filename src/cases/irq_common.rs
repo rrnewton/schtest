@@ -1375,6 +1375,124 @@ pub fn launch_ping_pong_probes(
     })
 }
 
+/// Handle for a single spinner probe worker
+pub struct SpinnerProbeHandle {
+    probe: Child,
+    stop_signal: SharedBox<AtomicU32>,
+    /// Final CPU for the probe
+    pub final_cpu: SharedBox<AtomicI32>,
+    /// Spin iterations completed
+    pub iterations: SharedBox<AtomicU64>,
+}
+
+impl SpinnerProbeHandle {
+    /// Stop the spinner probe and return final CPU location
+    pub fn stop(self) -> Result<(i32, u64)> {
+        self.stop_signal.store(1, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(100));
+        drop(self.probe);
+        Ok((
+            self.final_cpu.load(Ordering::Acquire),
+            self.iterations.load(Ordering::Acquire),
+        ))
+    }
+}
+
+/// Launch a single spinner probe worker.
+///
+/// This worker spins continuously, tracking its CPU location.
+/// It starts pinned to initial_cpu, then unpins itself on start signal.
+/// The scheduler may migrate it to a CPU with better characteristics.
+///
+/// The probe is named "probe1" and has nice value -10 for higher priority.
+pub fn launch_spinner_probe(
+    allocator: std::sync::Arc<BumpAllocator>,
+    initial_cpu: &Hyperthread,
+    start_signal: SharedBox<AtomicU32>,
+) -> Result<SpinnerProbeHandle> {
+    let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+    let final_cpu = SharedBox::new(allocator.clone(), AtomicI32::new(-1))?;
+    let iterations = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+
+    let initial_mask = CPUMask::new(initial_cpu);
+
+    let probe_start = start_signal.clone();
+    let probe_stop = stop_signal.clone();
+    let probe_final_cpu = final_cpu.clone();
+    let probe_iterations = iterations.clone();
+    let probe_mask = initial_mask.clone();
+
+    let probe = Child::run(
+        move || {
+            probe_mask.run(|| {
+                // Set thread name for tracing
+                unsafe {
+                    let name = std::ffi::CString::new("probe1").unwrap();
+                    libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+                }
+
+                // Set nice value to -10 for higher priority
+                unsafe {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+                }
+
+                // Wait for start signal
+                while probe_start.load(Ordering::Acquire) == 0 {
+                    std::hint::spin_loop();
+                }
+
+                // Unpin ourselves
+                unsafe {
+                    let mut mask: libc::cpu_set_t = std::mem::zeroed();
+                    for i in 0..libc::CPU_SETSIZE as usize {
+                        libc::CPU_SET(i, &mut mask);
+                    }
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mask);
+                }
+
+                let mut local_iter = 0u64;
+
+                // Spin loop
+                loop {
+                    if probe_stop.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+
+                    // Record current CPU periodically
+                    let cpu = unsafe { libc::sched_getcpu() };
+                    probe_final_cpu.store(cpu, Ordering::Release);
+
+                    // Tight spin with compiler fence
+                    for _ in 0..10000 {
+                        std::sync::atomic::compiler_fence(Ordering::SeqCst);
+                    }
+
+                    local_iter += 1;
+                    if local_iter % 1000 == 0 {
+                        probe_iterations.store(local_iter, Ordering::Release);
+                    }
+                }
+
+                // Record final CPU
+                let cpu = unsafe { libc::sched_getcpu() };
+                probe_final_cpu.store(cpu, Ordering::Release);
+                probe_iterations.store(local_iter, Ordering::Release);
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
+
+    eprintln!("Launched spinner probe (nice -10)");
+
+    Ok(SpinnerProbeHandle {
+        probe,
+        stop_signal,
+        final_cpu,
+        iterations,
+    })
+}
+
 /// Helper function to launch a CPU hog and add it to a cgroup
 pub fn launch_cgroup_hog(
     _cpu_id: i32,

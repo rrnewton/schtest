@@ -694,40 +694,38 @@ def print_probe_stats(probe_stats: dict[str, ProbeStats], control_cpus: list[int
     print("Probe Thread Latency Criticality (NORM_LC)")
     print("=" * 80)
 
-    if not probe_stats:
-        print("  No probe thread data collected")
-        print("  (Probes may not have been scheduled during monitoring window)")
-        return
-
     # Print header
     print(f"{'Thread':>8} {'Samples':>8} {'Min':>8} {'Max':>8} {'Avg':>10} {'CPUs Used'}")
     print("-" * 80)
 
-    for name in sorted(probe_stats.keys()):
-        stats = probe_stats[name]
-        if stats.count == 0:
-            continue
+    # Always show both probe1 and probe2, with N/A for missing data
+    for name in ["probe1", "probe2"]:
+        if name in probe_stats and probe_stats[name].count > 0:
+            stats = probe_stats[name]
+            cpus_str = ",".join(str(c) for c in sorted(stats.cpus_used))
+            # Mark if any CPU was a control CPU
+            on_control = any(c in control_cpus for c in stats.cpus_used)
+            if on_control:
+                cpus_str += " (incl. CONTROL)"
 
-        cpus_str = ",".join(str(c) for c in sorted(stats.cpus_used))
-        # Mark if any CPU was a control CPU
-        on_control = any(c in control_cpus for c in stats.cpus_used)
-        if on_control:
-            cpus_str += " (incl. CONTROL)"
-
-        print(f"{name:>8} {stats.count:>8} {stats.norm_lc_min or 0:>8} "
-              f"{stats.norm_lc_max or 0:>8} {stats.norm_lc_avg or 0:>10.1f} {cpus_str}")
+            print(f"{name:>8} {stats.count:>8} {stats.norm_lc_min or 0:>8} "
+                  f"{stats.norm_lc_max or 0:>8} {stats.norm_lc_avg or 0:>10.1f} {cpus_str}")
+        else:
+            print(f"{name:>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>10} N/A")
 
     # Summary interpretation
     print()
-    for name, stats in sorted(probe_stats.items()):
-        if stats.count == 0:
-            continue
-        avg_lc = stats.norm_lc_avg or 0
-        # LAVD_LC_LATENCY_SENSITIVE_THRESH is typically 880
-        if avg_lc >= 880:
-            print(f"  {name}: avg NORM_LC={avg_lc:.0f} >= 880 -> treated as LATENCY SENSITIVE")
+    for name in ["probe1", "probe2"]:
+        if name in probe_stats and probe_stats[name].count > 0:
+            stats = probe_stats[name]
+            avg_lc = stats.norm_lc_avg or 0
+            # LAVD_LC_LATENCY_SENSITIVE_THRESH is typically 880
+            if avg_lc >= 880:
+                print(f"  {name}: avg NORM_LC={avg_lc:.0f} >= 880 -> treated as LATENCY SENSITIVE")
+            else:
+                print(f"  {name}: avg NORM_LC={avg_lc:.0f} < 880 -> NOT treated as latency sensitive")
         else:
-            print(f"  {name}: avg NORM_LC={avg_lc:.0f} < 880 -> NOT treated as latency sensitive")
+            print(f"  {name}: N/A (not scheduled during monitoring window)")
 
 
 def print_lat_cap_summary(
