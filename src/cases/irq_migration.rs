@@ -31,8 +31,9 @@ use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::spinner_utilization;
 
 use super::irq_common::{
-    get_reserved_tracing_core, get_test_duration, launch_timer_irq_disruption, log_scheduler_info,
-    InterruptSnapshot, TimerIrqHandle, DEFAULT_IRQ_HZ, NUM_TIMERS,
+    get_reserved_tracing_core, get_test_duration, launch_lat_cap_workers, launch_timer_irq_disruption,
+    log_scheduler_info, InterruptSnapshot, TimerIrqHandle, DEFAULT_IRQ_HZ,
+    LAT_CAP_WORKER_DUTY_CYCLE_PCT, LAT_CAP_WORKER_PERIOD_MS, NUM_TIMERS,
 };
 
 /// Test whether the scheduler migrates a task from IRQ-heavy CPUs to a quiet CPU.
@@ -116,6 +117,37 @@ fn irq_migration_test() -> Result<()> {
     let bogo_ops = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
     let final_cpu = SharedBox::new(allocator.clone(), AtomicI32::new(-1))?;
 
+    // Collect ALL CPUs for lat_cap measurement (including control CPU)
+    let all_cpus: Vec<_> = cores
+        .iter()
+        .flat_map(|core| core.hyperthreads().iter().cloned())
+        .collect();
+
+    // Launch lat_cap measurement workers on ALL CPUs before the test
+    // This ensures LAVD has accurate stolen_time_est measurements for every CPU
+    eprintln!("\nLaunching lat_cap measurement workers on all {} CPUs...", all_cpus.len());
+    let lat_cap_workers = launch_lat_cap_workers(
+        allocator.clone(),
+        &all_cpus,
+        start_signal.clone(),
+        LAT_CAP_WORKER_DUTY_CYCLE_PCT,
+        LAT_CAP_WORKER_PERIOD_MS,
+    )?;
+
+    // Start lat_cap workers and let them run briefly to establish baseline lat_cap values
+    eprintln!("Starting lat_cap workers for warm-up period...");
+    start_signal.store(1, Ordering::Release);
+
+    // Warm-up period: let lat_cap workers run for ~1 second so LAVD can establish
+    // baseline stolen_time_est values on all CPUs before the IRQ storm starts
+    let warmup_duration = Duration::from_secs(1);
+    eprintln!("Warming up lat_cap measurements for {:?}...", warmup_duration);
+    std::thread::sleep(warmup_duration);
+
+    // Reset start signal for the actual test workers
+    start_signal.store(0, Ordering::Release);
+    let test_start_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+
     // Capture interrupt baseline
     eprintln!("\nCapturing interrupt baseline...");
     let interrupts_before = InterruptSnapshot::capture()?;
@@ -128,7 +160,7 @@ fn irq_migration_test() -> Result<()> {
         let handle = launch_timer_irq_disruption(
             allocator.clone(),
             victim_cpu,
-            start_signal.clone(),
+            test_start_signal.clone(),
             DEFAULT_IRQ_HZ,
         )?;
         irq_handles.push(handle);
@@ -138,7 +170,7 @@ fn irq_migration_test() -> Result<()> {
     eprintln!("\nLaunching worker on CPU {} (will unpin after start)...", initial_victim_cpu_id);
 
     // Launch worker pinned to initial victim CPU
-    let worker_start = start_signal.clone();
+    let worker_start = test_start_signal.clone();
     let worker_scheduled = scheduled_ns.clone();
     let worker_bogo = bogo_ops.clone();
     let worker_final_cpu = final_cpu.clone();
@@ -195,9 +227,9 @@ fn irq_migration_test() -> Result<()> {
     // Give everything a moment to initialize
     std::thread::sleep(Duration::from_millis(100));
 
-    // Signal start
+    // Signal start for test workers (lat_cap workers already running from warm-up)
     eprintln!("Signaling START (worker will unpin and run for {:?})", hog_duration);
-    start_signal.store(1, Ordering::Release);
+    test_start_signal.store(1, Ordering::Release);
 
     // Wait for worker to complete
     if let Some(result) = worker.wait(true, false) {
@@ -211,6 +243,10 @@ fn irq_migration_test() -> Result<()> {
     for handle in irq_handles {
         total_timer_wakeups += handle.stop()?;
     }
+
+    // Stop lat_cap measurement workers
+    eprintln!("Stopping lat_cap measurement workers...");
+    lat_cap_workers.stop()?;
 
     // Capture interrupt counts after
     let interrupts_after = InterruptSnapshot::capture()?;

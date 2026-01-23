@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 
 use crate::util::child::Child;
 use crate::util::shared::{BumpAllocator, SharedBox};
-use crate::util::system::{CPUMask, CPUSet, Hyperthread};
+use crate::util::system::{default_scheduler_name, CPUMask, CPUSet, Hyperthread};
 
 /// Per-CPU interrupt counts parsed from /proc/interrupts
 #[derive(Debug, Clone)]
@@ -740,12 +740,15 @@ pub fn log_scheduler_info() {
         // Try to read the current scheduler name
         if let Some(scheduler) = read_sysfs("/sys/kernel/sched_ext/root/ops") {
             eprintln!("  Current scheduler:            {}", scheduler);
-        } else if let Some(scheduler) = read_sysfs("/sys/kernel/sched_ext/state") {
-            eprintln!("  sched_ext state:              {}", scheduler);
+        } else {
+            // sched_ext is available but no scheduler loaded - using default kernel scheduler
+            let state = read_sysfs("/sys/kernel/sched_ext/state").unwrap_or_default();
+            eprintln!("  sched_ext state:              {}", state);
+            eprintln!("  Scheduler:                    {} (default)", default_scheduler_name());
         }
     } else {
         eprintln!("  sched_ext:                    NOT ACTIVE");
-        eprintln!("  Scheduler:                    CFS (default)");
+        eprintln!("  Scheduler:                    {} (default)", default_scheduler_name());
     }
 
     // Check scheduler features
@@ -939,6 +942,115 @@ pub fn launch_pmu_irq_disruption(
 
 /// Default IRQ frequency for timer-based disruption (140kHz - kernel max for hrtimer)
 pub const DEFAULT_IRQ_HZ: u64 = 140 * 1000;
+
+/// Handle for background lat_cap measurement workers
+pub struct LatCapWorkersHandle {
+    workers: Vec<Child>,
+    stop_signal: SharedBox<AtomicU32>,
+}
+
+impl LatCapWorkersHandle {
+    /// Stop all background workers
+    pub fn stop(self) -> Result<()> {
+        self.stop_signal.store(1, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(100));
+        // Workers will exit on their own when they see stop signal
+        drop(self.workers);
+        Ok(())
+    }
+}
+
+/// Default duty cycle for lat_cap measurement workers (5% active, 95% sleeping)
+pub const LAT_CAP_WORKER_DUTY_CYCLE_PCT: u64 = 5;
+
+/// Default period for lat_cap measurement workers (100ms cycle)
+pub const LAT_CAP_WORKER_PERIOD_MS: u64 = 100;
+
+/// Launch low duty-cycle background workers pinned to every specified CPU.
+///
+/// These workers ensure LAVD's stolen_time_est gets sampled on every core.
+/// Each worker:
+/// - Sleeps for (100 - duty_cycle)% of each period
+/// - Spins for duty_cycle% of each period
+/// - Repeats until stop signal
+///
+/// This is necessary because LAVD only updates stolen_time_est when tasks
+/// actually run on a CPU. Without these workers, CPUs with no tasks would
+/// have stale/zero lat_capacity values.
+pub fn launch_lat_cap_workers(
+    allocator: std::sync::Arc<BumpAllocator>,
+    cpus: &[Hyperthread],
+    start_signal: SharedBox<AtomicU32>,
+    duty_cycle_pct: u64,
+    period_ms: u64,
+) -> Result<LatCapWorkersHandle> {
+    let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+    let mut workers = Vec::new();
+
+    // Calculate spin and sleep durations
+    let spin_ms = (period_ms * duty_cycle_pct) / 100;
+    let sleep_ms = period_ms - spin_ms;
+
+    for cpu in cpus {
+        let cpu_mask = CPUMask::new(cpu);
+        let cpu_id = cpu.id();
+        let worker_start = start_signal.clone();
+        let worker_stop = stop_signal.clone();
+
+        let worker = Child::run(
+            move || {
+                cpu_mask.run(|| {
+                    // Set thread name for identification
+                    unsafe {
+                        let name = std::ffi::CString::new(format!("latcap_{}", cpu_id)).unwrap();
+                        libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+                    }
+
+                    // Wait for start signal
+                    while worker_start.load(Ordering::Acquire) == 0 {
+                        std::hint::spin_loop();
+                    }
+
+                    // Low duty-cycle loop: sleep, then spin briefly
+                    loop {
+                        if worker_stop.load(Ordering::Acquire) != 0 {
+                            break;
+                        }
+
+                        // Sleep phase (most of the period)
+                        std::thread::sleep(Duration::from_millis(sleep_ms));
+
+                        if worker_stop.load(Ordering::Acquire) != 0 {
+                            break;
+                        }
+
+                        // Spin phase (brief work to sample stolen_time)
+                        let spin_until = std::time::Instant::now()
+                            + Duration::from_millis(spin_ms);
+                        while std::time::Instant::now() < spin_until {
+                            std::hint::spin_loop();
+                        }
+                    }
+                })?;
+                Ok(())
+            },
+            None,
+        )?;
+        workers.push(worker);
+    }
+
+    eprintln!(
+        "Launched {} lat_cap measurement workers ({}% duty cycle, {}ms period)",
+        workers.len(),
+        duty_cycle_pct,
+        period_ms
+    );
+
+    Ok(LatCapWorkersHandle {
+        workers,
+        stop_signal,
+    })
+}
 
 /// Helper function to launch a CPU hog and add it to a cgroup
 pub fn launch_cgroup_hog(
