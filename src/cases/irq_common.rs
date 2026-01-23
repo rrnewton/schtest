@@ -1127,7 +1127,7 @@ pub fn launch_ping_pong_probes(
             probe_a_mask.run(|| {
                 // Set thread name for tracing
                 unsafe {
-                    let name = std::ffi::CString::new("probe").unwrap();
+                    let name = std::ffi::CString::new("probe1").unwrap();
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                 }
 
@@ -1236,7 +1236,7 @@ pub fn launch_ping_pong_probes(
             probe_b_mask.run(|| {
                 // Set thread name for tracing
                 unsafe {
-                    let name = std::ffi::CString::new("probe").unwrap();
+                    let name = std::ffi::CString::new("probe2").unwrap();
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                 }
 

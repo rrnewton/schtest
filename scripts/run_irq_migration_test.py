@@ -73,6 +73,34 @@ class LatCapStats:
 
 
 @dataclass
+class ProbeStats:
+    """Statistics for probe thread scheduling metrics."""
+    name: str
+    norm_lc_samples: list[int] = field(default_factory=list)  # NORM_LC values
+    cpu_samples: list[int] = field(default_factory=list)       # CPU where scheduled
+
+    @property
+    def count(self) -> int:
+        return len(self.norm_lc_samples)
+
+    @property
+    def norm_lc_min(self) -> Optional[int]:
+        return min(self.norm_lc_samples) if self.norm_lc_samples else None
+
+    @property
+    def norm_lc_max(self) -> Optional[int]:
+        return max(self.norm_lc_samples) if self.norm_lc_samples else None
+
+    @property
+    def norm_lc_avg(self) -> Optional[float]:
+        return sum(self.norm_lc_samples) / len(self.norm_lc_samples) if self.norm_lc_samples else None
+
+    @property
+    def cpus_used(self) -> set[int]:
+        return set(self.cpu_samples)
+
+
+@dataclass
 class MigrationResult:
     """Result from a single migration test run."""
     trial_num: int
@@ -97,7 +125,14 @@ class MigrationResult:
 
 
 class LavdMonitor:
-    """Monitor LAVD scheduler output and track LAT_CAP per CPU."""
+    """Monitor LAVD scheduler output and track LAT_CAP per CPU and probe thread metrics."""
+
+    # Column indices in LAVD monitor output (0-indexed after split by |)
+    # Format: | MSEQ | PID | COMM | STAT | CPU | NICE | PRI | LAT_PRI | AVG_LAT | SC_LAT | NORM_LC | ...
+    COL_COMM = 3
+    COL_CPU = 5
+    COL_NORM_LC = 11  # Normalized latency criticality
+    COL_LAT_CAP = 24  # Latency capacity
 
     def __init__(self, scx_lavd_path: Path, nr_samples: int = 32):
         self.scx_lavd_path = scx_lavd_path
@@ -105,41 +140,63 @@ class LavdMonitor:
         self.process: Optional[subprocess.Popen] = None
         self.monitor_thread: Optional[threading.Thread] = None
         self.lat_cap_stats: dict[int, LatCapStats] = defaultdict(lambda: LatCapStats(cpu_id=-1))
+        self.probe_stats: dict[str, ProbeStats] = {}  # keyed by thread name (probe1, probe2)
         self.lock = threading.Lock()
         self.running = False
         self.output_lines: list[str] = []
+        self.header_logged = False
 
     def _parse_monitor_line(self, line: str):
-        """Parse a single monitor output line and extract CPU and LAT_CAP."""
-        # Monitor format: | MSEQ | PID | COMM | STAT | CPU | ... | LAT_CAP | ...
+        """Parse a single monitor output line and extract metrics."""
+        # Monitor format: | MSEQ | PID | COMM | STAT | CPU | ... | NORM_LC | ... | LAT_CAP | ...
         # Fields are separated by |
         if not line.startswith("|"):
             return
 
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 24:  # Need at least up to LAT_CAP
+        if len(parts) < self.COL_LAT_CAP + 1:
             return
 
+        # Log header once for debugging column indices
+        if not self.header_logged and (parts[1] == "MSEQ" or "MSEQ" in line):
+            self.header_logged = True
+            # Print column indices for debugging
+            # print(f"  Monitor columns: {list(enumerate(parts))}")
+
         # Skip header lines
-        if parts[1] == "MSEQ" or parts[5] == "CPU":
+        if parts[1] == "MSEQ" or parts[self.COL_CPU] == "CPU":
             return
 
         try:
-            # CPU is at index 5, LAT_CAP is at index 24
-            cpu_str = parts[5]
-            lat_cap_str = parts[24]
+            comm = parts[self.COL_COMM]
+            cpu_str = parts[self.COL_CPU]
 
-            # Skip if not numeric
+            # Skip if CPU not numeric
             if not cpu_str.isdigit():
                 return
 
             cpu_id = int(cpu_str)
+
+            # Parse LAT_CAP for all entries
+            lat_cap_str = parts[self.COL_LAT_CAP]
             lat_cap = int(lat_cap_str)
 
             with self.lock:
                 if self.lat_cap_stats[cpu_id].cpu_id == -1:
                     self.lat_cap_stats[cpu_id] = LatCapStats(cpu_id=cpu_id)
                 self.lat_cap_stats[cpu_id].samples.append(lat_cap)
+
+                # Track probe threads specifically
+                if comm in ("probe1", "probe2"):
+                    if comm not in self.probe_stats:
+                        self.probe_stats[comm] = ProbeStats(name=comm)
+
+                    # Parse NORM_LC for probe threads
+                    norm_lc_str = parts[self.COL_NORM_LC]
+                    norm_lc = int(norm_lc_str)
+
+                    self.probe_stats[comm].norm_lc_samples.append(norm_lc)
+                    self.probe_stats[comm].cpu_samples.append(cpu_id)
 
         except (ValueError, IndexError):
             pass  # Skip malformed lines
@@ -202,8 +259,8 @@ class LavdMonitor:
         sample_count = self.get_sample_count()
         print(f"  LAVD monitor running (PID {self.process.pid}), {sample_count} initial samples")
 
-    def stop(self) -> dict[int, LatCapStats]:
-        """Stop the monitor and return collected stats."""
+    def stop(self) -> tuple[dict[int, LatCapStats], dict[str, ProbeStats]]:
+        """Stop the monitor and return (lat_cap_stats, probe_stats)."""
         self.running = False
 
         if self.process:
@@ -218,7 +275,7 @@ class LavdMonitor:
             self.monitor_thread.join(timeout=2)
 
         with self.lock:
-            return dict(self.lat_cap_stats)
+            return dict(self.lat_cap_stats), dict(self.probe_stats)
 
 
 class SchedulerManager:
@@ -631,6 +688,48 @@ def run_single_trial(
     return result, output
 
 
+def print_probe_stats(probe_stats: dict[str, ProbeStats], control_cpus: list[int]):
+    """Print probe thread latency criticality statistics."""
+    print("\n" + "=" * 80)
+    print("Probe Thread Latency Criticality (NORM_LC)")
+    print("=" * 80)
+
+    if not probe_stats:
+        print("  No probe thread data collected")
+        print("  (Probes may not have been scheduled during monitoring window)")
+        return
+
+    # Print header
+    print(f"{'Thread':>8} {'Samples':>8} {'Min':>8} {'Max':>8} {'Avg':>10} {'CPUs Used'}")
+    print("-" * 80)
+
+    for name in sorted(probe_stats.keys()):
+        stats = probe_stats[name]
+        if stats.count == 0:
+            continue
+
+        cpus_str = ",".join(str(c) for c in sorted(stats.cpus_used))
+        # Mark if any CPU was a control CPU
+        on_control = any(c in control_cpus for c in stats.cpus_used)
+        if on_control:
+            cpus_str += " (incl. CONTROL)"
+
+        print(f"{name:>8} {stats.count:>8} {stats.norm_lc_min or 0:>8} "
+              f"{stats.norm_lc_max or 0:>8} {stats.norm_lc_avg or 0:>10.1f} {cpus_str}")
+
+    # Summary interpretation
+    print()
+    for name, stats in sorted(probe_stats.items()):
+        if stats.count == 0:
+            continue
+        avg_lc = stats.norm_lc_avg or 0
+        # LAVD_LC_LATENCY_SENSITIVE_THRESH is typically 880
+        if avg_lc >= 880:
+            print(f"  {name}: avg NORM_LC={avg_lc:.0f} >= 880 -> treated as LATENCY SENSITIVE")
+        else:
+            print(f"  {name}: avg NORM_LC={avg_lc:.0f} < 880 -> NOT treated as latency sensitive")
+
+
 def print_lat_cap_summary(
     lat_cap_stats: dict[int, LatCapStats],
     victim_cpus: list[int],
@@ -638,7 +737,7 @@ def print_lat_cap_summary(
 ):
     """Print LAT_CAP statistics summary."""
     print("\n" + "=" * 80)
-    print("LAT_CAP Statistics by CPU")
+    print("LAT_CAP Statistics by CPU (Latency Capacity)")
     print("=" * 80)
 
     if not lat_cap_stats:
@@ -965,9 +1064,10 @@ def main():
     finally:
         # Stop LAVD monitor and collect stats
         lat_cap_stats = {}
+        probe_stats = {}
         if lavd_monitor:
             print("\nStopping LAVD monitor...")
-            lat_cap_stats = lavd_monitor.stop()
+            lat_cap_stats, probe_stats = lavd_monitor.stop()
 
         # Stop scheduler
         if scheduler_mgr:
@@ -977,8 +1077,9 @@ def main():
     # Print results
     print_summary(results)
 
-    # Print and validate LAT_CAP stats if monitoring was enabled
-    if lat_cap_stats:
+    # Print probe thread and LAT_CAP stats if monitoring was enabled
+    if lat_cap_stats or probe_stats:
+        print_probe_stats(probe_stats, control_cpus)
         print_lat_cap_summary(lat_cap_stats, victim_cpus, control_cpus)
         validate_lat_cap_results(lat_cap_stats, victim_cpus, control_cpus)
 
