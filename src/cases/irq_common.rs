@@ -1131,6 +1131,11 @@ pub fn launch_ping_pong_probes(
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                 }
 
+                // Set nice value to -10 for higher priority
+                unsafe {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+                }
+
                 // Wait for start signal
                 while probe_a_start.load(Ordering::Acquire) == 0 {
                     std::hint::spin_loop();
@@ -1238,6 +1243,11 @@ pub fn launch_ping_pong_probes(
                 unsafe {
                     let name = std::ffi::CString::new("probe2").unwrap();
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+                }
+
+                // Set nice value to -10 for higher priority
+                unsafe {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, -10);
                 }
 
                 // Wait for start signal
