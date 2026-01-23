@@ -184,9 +184,9 @@ fn irq_migration_test() -> Result<()> {
     std::thread::sleep(test_duration);
     eprintln!("Test duration complete");
 
-    // Stop spinner probe and get final CPU position
+    // Stop spinner probe and get final CPU position + transition history
     eprintln!("Stopping spinner probe...");
-    let (final_cpu, spinner_iterations) = spinner_probe.stop()?;
+    let (final_cpu, spinner_iterations, transitions) = spinner_probe.stop()?;
 
     // Stop all IRQ disruption
     eprintln!("Stopping IRQ disruption on {} CPUs...", irq_handles.len());
@@ -215,12 +215,62 @@ fn irq_migration_test() -> Result<()> {
     eprintln!("Final CPU: {}", final_cpu);
     eprintln!("Control CPUs: {:?}", control_cpu_ids);
 
+    // Print CPU transition history
+    eprintln!("\n=== CPU Transitions ({} total) ===", transitions.len());
+    if transitions.is_empty() {
+        eprintln!("  No CPU transitions detected (probe stayed on CPU {})", initial_victim_cpu_id);
+    } else {
+        eprintln!("{:>12} {:>12} {:>8} {:>8}  {}", "Iteration", "Elapsed", "From", "To", "Note");
+        for t in &transitions {
+            let elapsed_ms = t.elapsed_ns as f64 / 1_000_000.0;
+            let note = if control_cpu_ids.contains(&t.to_cpu) {
+                "-> CONTROL"
+            } else if control_cpu_ids.contains(&t.from_cpu) {
+                "<- left CONTROL"
+            } else {
+                ""
+            };
+            eprintln!("{:>12} {:>10.1}ms {:>8} {:>8}  {}",
+                      t.iteration, elapsed_ms, t.from_cpu, t.to_cpu, note);
+        }
+
+        // Summary: time spent on each CPU
+        eprintln!("\n  CPU residence summary:");
+        let mut cpu_time: std::collections::HashMap<i32, u64> = std::collections::HashMap::new();
+        let mut prev_cpu = initial_victim_cpu_id;
+        let mut prev_time: u64 = 0;
+        for t in &transitions {
+            let duration = t.elapsed_ns - prev_time;
+            *cpu_time.entry(prev_cpu).or_insert(0) += duration;
+            prev_cpu = t.to_cpu;
+            prev_time = t.elapsed_ns;
+        }
+        // Add final segment (estimate based on test duration)
+        let test_duration_ns = test_duration.as_nanos() as u64;
+        if prev_time < test_duration_ns {
+            *cpu_time.entry(prev_cpu).or_insert(0) += test_duration_ns - prev_time;
+        }
+
+        let mut cpu_times: Vec<_> = cpu_time.into_iter().collect();
+        cpu_times.sort_by_key(|(cpu, _)| *cpu);
+        for (cpu, time_ns) in cpu_times {
+            let time_ms = time_ns as f64 / 1_000_000.0;
+            let pct = time_ns as f64 / test_duration_ns as f64 * 100.0;
+            let role = if control_cpu_ids.contains(&cpu) { " (CONTROL)" } else { "" };
+            eprintln!("    CPU {:>3}: {:>8.1}ms ({:>5.1}%){}", cpu, time_ms, pct, role);
+        }
+    }
+
     // Check if probe migrated to control core (any of its hyperthreads)
     let probe_on_control = control_cpu_ids.contains(&final_cpu);
     let probe_migrated = final_cpu != initial_victim_cpu_id;
+    let ever_on_control = transitions.iter().any(|t| control_cpu_ids.contains(&t.to_cpu));
 
+    eprintln!();
     if probe_on_control {
         eprintln!("✓ SUCCESS: Probe migrated to control core (CPU {})", final_cpu);
+    } else if ever_on_control {
+        eprintln!("⚠ PARTIAL: Probe visited control core but left");
     } else if probe_migrated {
         eprintln!("⚠ PARTIAL: Probe migrated but not to control core");
         eprintln!("  Probe: {} -> {}", initial_victim_cpu_id, final_cpu);

@@ -1375,6 +1375,41 @@ pub fn launch_ping_pong_probes(
     })
 }
 
+/// Maximum number of CPU transitions to record
+pub const MAX_CPU_TRANSITIONS: usize = 1024;
+
+/// A single CPU transition event
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct CpuTransition {
+    /// Iteration number when transition occurred
+    pub iteration: u64,
+    /// Elapsed nanoseconds since probe start
+    pub elapsed_ns: u64,
+    /// CPU before the transition
+    pub from_cpu: i32,
+    /// CPU after the transition
+    pub to_cpu: i32,
+}
+
+/// Shared memory structure for CPU transition history
+#[repr(C)]
+pub struct CpuTransitionLog {
+    /// Number of transitions recorded
+    pub count: AtomicU32,
+    /// Transition entries (fixed-size array)
+    pub entries: [CpuTransition; MAX_CPU_TRANSITIONS],
+}
+
+impl Default for CpuTransitionLog {
+    fn default() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            entries: [CpuTransition::default(); MAX_CPU_TRANSITIONS],
+        }
+    }
+}
+
 /// Handle for a single spinner probe worker
 pub struct SpinnerProbeHandle {
     probe: Child,
@@ -1383,24 +1418,37 @@ pub struct SpinnerProbeHandle {
     pub final_cpu: SharedBox<AtomicI32>,
     /// Spin iterations completed
     pub iterations: SharedBox<AtomicU64>,
+    /// CPU transition log
+    transition_log: SharedBox<CpuTransitionLog>,
 }
 
 impl SpinnerProbeHandle {
-    /// Stop the spinner probe and return final CPU location
-    pub fn stop(self) -> Result<(i32, u64)> {
+    /// Stop the spinner probe and return (final_cpu, iterations, transitions)
+    pub fn stop(self) -> Result<(i32, u64, Vec<CpuTransition>)> {
         self.stop_signal.store(1, Ordering::Release);
         std::thread::sleep(Duration::from_millis(100));
         drop(self.probe);
-        Ok((
-            self.final_cpu.load(Ordering::Acquire),
-            self.iterations.load(Ordering::Acquire),
-        ))
+
+        let final_cpu = self.final_cpu.load(Ordering::Acquire);
+        let iterations = self.iterations.load(Ordering::Acquire);
+
+        // Copy transitions from shared memory
+        let count = self.transition_log.count.load(Ordering::Acquire) as usize;
+        let count = count.min(MAX_CPU_TRANSITIONS);
+        let transitions: Vec<CpuTransition> = self.transition_log.entries[..count]
+            .iter()
+            .copied()
+            .collect();
+
+        Ok((final_cpu, iterations, transitions))
     }
 }
 
 /// Launch a single spinner probe worker.
 ///
-/// This worker spins continuously, tracking its CPU location.
+/// This worker spins continuously, tracking its CPU location and recording
+/// CPU transitions (migrations) with timestamps.
+///
 /// It starts pinned to initial_cpu, then unpins itself on start signal.
 /// The scheduler may migrate it to a CPU with better characteristics.
 ///
@@ -1413,6 +1461,7 @@ pub fn launch_spinner_probe(
     let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
     let final_cpu = SharedBox::new(allocator.clone(), AtomicI32::new(-1))?;
     let iterations = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+    let transition_log = SharedBox::new(allocator.clone(), CpuTransitionLog::default())?;
 
     let initial_mask = CPUMask::new(initial_cpu);
 
@@ -1420,6 +1469,7 @@ pub fn launch_spinner_probe(
     let probe_stop = stop_signal.clone();
     let probe_final_cpu = final_cpu.clone();
     let probe_iterations = iterations.clone();
+    let probe_transition_log = transition_log.clone();
     let probe_mask = initial_mask.clone();
 
     let probe = Child::run(
@@ -1441,6 +1491,9 @@ pub fn launch_spinner_probe(
                     std::hint::spin_loop();
                 }
 
+                // Record start time for elapsed calculations
+                let start_time = std::time::Instant::now();
+
                 // Unpin ourselves
                 unsafe {
                     let mut mask: libc::cpu_set_t = std::mem::zeroed();
@@ -1451,6 +1504,25 @@ pub fn launch_spinner_probe(
                 }
 
                 let mut local_iter = 0u64;
+                let mut current_cpu = unsafe { libc::sched_getcpu() };
+                probe_final_cpu.store(current_cpu, Ordering::Release);
+
+                // Helper to record a transition
+                let record_transition = |log: &CpuTransitionLog, iter: u64, elapsed_ns: u64, from: i32, to: i32| {
+                    let idx = log.count.fetch_add(1, Ordering::AcqRel) as usize;
+                    if idx < MAX_CPU_TRANSITIONS {
+                        // Safety: we're the only writer to this index, using ptr::write
+                        let entry_ptr = log.entries.as_ptr().wrapping_add(idx) as *mut CpuTransition;
+                        unsafe {
+                            std::ptr::write(entry_ptr, CpuTransition {
+                                iteration: iter,
+                                elapsed_ns,
+                                from_cpu: from,
+                                to_cpu: to,
+                            });
+                        }
+                    }
+                };
 
                 // Spin loop
                 loop {
@@ -1458,9 +1530,14 @@ pub fn launch_spinner_probe(
                         break;
                     }
 
-                    // Record current CPU periodically
+                    // Check current CPU and detect transitions
                     let cpu = unsafe { libc::sched_getcpu() };
-                    probe_final_cpu.store(cpu, Ordering::Release);
+                    if cpu != current_cpu {
+                        let elapsed_ns = start_time.elapsed().as_nanos() as u64;
+                        record_transition(&probe_transition_log, local_iter, elapsed_ns, current_cpu, cpu);
+                        current_cpu = cpu;
+                        probe_final_cpu.store(cpu, Ordering::Release);
+                    }
 
                     // Tight spin with compiler fence
                     for _ in 0..10000 {
@@ -1473,7 +1550,7 @@ pub fn launch_spinner_probe(
                     }
                 }
 
-                // Record final CPU
+                // Record final state
                 let cpu = unsafe { libc::sched_getcpu() };
                 probe_final_cpu.store(cpu, Ordering::Release);
                 probe_iterations.store(local_iter, Ordering::Release);
@@ -1483,13 +1560,14 @@ pub fn launch_spinner_probe(
         None,
     )?;
 
-    eprintln!("Launched spinner probe (nice -10)");
+    eprintln!("Launched spinner probe (nice -10, tracking CPU transitions)");
 
     Ok(SpinnerProbeHandle {
         probe,
         stop_signal,
         final_cpu,
         iterations,
+        transition_log,
     })
 }
 
