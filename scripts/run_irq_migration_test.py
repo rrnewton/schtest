@@ -292,6 +292,36 @@ class SchedulerManager:
 
         print(f"  Scheduler {ops} running (PID {self.process.pid})")
 
+    def is_alive(self) -> bool:
+        """Check if the scheduler process is still running."""
+        if not self.process:
+            return False
+        return self.process.poll() is None
+
+    def check_alive(self):
+        """Check if scheduler is alive and raise an error if it died."""
+        if not self.process:
+            return  # No scheduler was started by us
+
+        exit_code = self.process.poll()
+        if exit_code is not None:
+            # Scheduler died - collect output for diagnostics
+            stdout = self.process.stdout.read() if self.process.stdout else ""
+            stderr = self.process.stderr.read() if self.process.stderr else ""
+            self.process = None  # Mark as dead
+
+            error_msg = f"Scheduler died unexpectedly (exit code {exit_code})"
+            if stdout:
+                error_msg += f"\nstdout: {stdout[-2000:]}"  # Last 2000 chars
+            if stderr:
+                error_msg += f"\nstderr: {stderr[-2000:]}"
+            raise RuntimeError(error_msg)
+
+        # Also verify sched_ext is still enabled
+        state, ops = get_sched_ext_state()
+        if state != "enabled":
+            raise RuntimeError(f"Scheduler process alive but sched_ext not enabled (state: {state})")
+
     def stop(self):
         """Stop the scheduler gracefully."""
         if not self.process:
@@ -889,6 +919,10 @@ def main():
             results.append(result)
             all_output += output
 
+            # Check scheduler is still alive after each trial
+            if scheduler_mgr:
+                scheduler_mgr.check_alive()
+
             # Extract victim and control CPUs from first trial
             if trial == 1:
                 victim_cpus = parse_victim_cpus_from_output(output)
@@ -901,6 +935,9 @@ def main():
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")
+    except RuntimeError as e:
+        print(f"\n\nERROR: {e}")
+        sys.exit(1)
     finally:
         # Stop LAVD monitor and collect stats
         lat_cap_stats = {}
