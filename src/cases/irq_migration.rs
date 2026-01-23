@@ -233,32 +233,40 @@ fn irq_migration_test() -> Result<()> {
             eprintln!("{:>12} {:>10.1}ms {:>8} {:>8}  {}",
                       t.iteration, elapsed_ms, t.from_cpu, t.to_cpu, note);
         }
+    }
 
-        // Summary: time spent on each CPU
-        eprintln!("\n  CPU residence summary:");
-        let mut cpu_time: std::collections::HashMap<i32, u64> = std::collections::HashMap::new();
-        let mut prev_cpu = initial_victim_cpu_id;
-        let mut prev_time: u64 = 0;
-        for t in &transitions {
-            let duration = t.elapsed_ns - prev_time;
-            *cpu_time.entry(prev_cpu).or_insert(0) += duration;
-            prev_cpu = t.to_cpu;
-            prev_time = t.elapsed_ns;
-        }
-        // Add final segment (estimate based on test duration)
-        let test_duration_ns = test_duration.as_nanos() as u64;
-        if prev_time < test_duration_ns {
-            *cpu_time.entry(prev_cpu).or_insert(0) += test_duration_ns - prev_time;
-        }
+    // CPU residence time summary (always print)
+    let test_duration_ns = test_duration.as_nanos() as u64;
+    let mut cpu_time: std::collections::HashMap<i32, u64> = std::collections::HashMap::new();
+    let mut prev_cpu = initial_victim_cpu_id;
+    let mut prev_time: u64 = 0;
+    for t in &transitions {
+        let duration = t.elapsed_ns - prev_time;
+        *cpu_time.entry(prev_cpu).or_insert(0) += duration;
+        prev_cpu = t.to_cpu;
+        prev_time = t.elapsed_ns;
+    }
+    // Add final segment
+    if prev_time < test_duration_ns {
+        *cpu_time.entry(prev_cpu).or_insert(0) += test_duration_ns - prev_time;
+    }
 
-        let mut cpu_times: Vec<_> = cpu_time.into_iter().collect();
-        cpu_times.sort_by_key(|(cpu, _)| *cpu);
-        for (cpu, time_ns) in cpu_times {
-            let time_ms = time_ns as f64 / 1_000_000.0;
-            let pct = time_ns as f64 / test_duration_ns as f64 * 100.0;
-            let role = if control_cpu_ids.contains(&cpu) { " (CONTROL)" } else { "" };
-            eprintln!("    CPU {:>3}: {:>8.1}ms ({:>5.1}%){}", cpu, time_ms, pct, role);
-        }
+    eprintln!("\n=== CPU Residence Time ===");
+    eprintln!("{:>6} {:>12} {:>8}  {}", "CPU", "Time", "Percent", "Role");
+    eprintln!("{}", "-".repeat(45));
+    let mut cpu_times: Vec<_> = cpu_time.into_iter().collect();
+    cpu_times.sort_by(|(_, a), (_, b)| b.cmp(a));  // Sort by time descending
+    for (cpu, time_ns) in &cpu_times {
+        let time_ms = *time_ns as f64 / 1_000_000.0;
+        let pct = *time_ns as f64 / test_duration_ns as f64 * 100.0;
+        let role = if control_cpu_ids.contains(cpu) {
+            "CONTROL"
+        } else if victim_cpu_ids.contains(&(*cpu as i32)) {
+            "VICTIM"
+        } else {
+            ""
+        };
+        eprintln!("{:>6} {:>10.1}ms {:>7.1}%  {}", cpu, time_ms, pct, role);
     }
 
     // Check if probe migrated to control core (any of its hyperthreads)
