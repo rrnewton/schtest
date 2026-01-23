@@ -523,11 +523,11 @@ def parse_migration_output(output: str) -> dict:
 
 def parse_victim_cpus_from_output(output: str) -> list[int]:
     """Extract victim CPU IDs from test output."""
-    # Look for lines like "Timer interrupts enabled on CPU 0 at..."
-    victim_cpus = []
-    for match in re.finditer(r"Timer interrupts enabled on CPU (\d+)", output):
-        victim_cpus.append(int(match.group(1)))
-    return victim_cpus
+    # Look for line like "Victim CPU IDs: [0, 1, 2, 3, ...]"
+    match = re.search(r"Victim CPU IDs:\s*\[([^\]]+)\]", output)
+    if match:
+        return [int(x.strip()) for x in match.group(1).split(",")]
+    return []
 
 
 def run_single_trial(

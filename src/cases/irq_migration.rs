@@ -93,11 +93,13 @@ fn irq_migration_test() -> Result<()> {
     if let Some(reserved_cpu) = reserved_tracing_cpu {
         eprintln!("Reserved tracing CPU: {} (no IRQ load)", reserved_cpu);
     }
+    let victim_cpu_ids: Vec<i32> = victim_cpus.iter().map(|h| h.id()).collect();
     eprintln!(
         "Victim CPUs: {} (all hyperthreads, excluding control core{})",
         victim_cpus.len(),
         if reserved_tracing_cpu.is_some() { " and tracing" } else { "" }
     );
+    eprintln!("Victim CPU IDs: {:?}", victim_cpu_ids);
     eprintln!("Initial probe CPU: {} (will be unpinned)", initial_victim_cpu_id);
     eprintln!(
         "IRQ load: {} Hz x {} timers = {} Hz per victim CPU",
