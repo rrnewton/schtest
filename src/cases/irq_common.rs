@@ -1002,9 +1002,10 @@ pub fn launch_lat_cap_workers(
                 cpu_mask.run(|| {
                     // Set thread name for identification
                     unsafe {
-                        let name = std::ffi::CString::new(format!("latcap_{}", cpu_id)).unwrap();
+                        let name = std::ffi::CString::new("background").unwrap();
                         libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                     }
+                    let _ = cpu_id; // Silence unused warning
 
                     // Wait for start signal
                     while worker_start.load(Ordering::Acquire) == 0 {
@@ -1126,7 +1127,7 @@ pub fn launch_ping_pong_probes(
             probe_a_mask.run(|| {
                 // Set thread name for tracing
                 unsafe {
-                    let name = std::ffi::CString::new("probe_a").unwrap();
+                    let name = std::ffi::CString::new("probe").unwrap();
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                 }
 
@@ -1235,7 +1236,7 @@ pub fn launch_ping_pong_probes(
             probe_b_mask.run(|| {
                 // Set thread name for tracing
                 unsafe {
-                    let name = std::ffi::CString::new("probe_b").unwrap();
+                    let name = std::ffi::CString::new("probe").unwrap();
                     libc::prctl(libc::PR_SET_NAME, name.as_ptr());
                 }
 
