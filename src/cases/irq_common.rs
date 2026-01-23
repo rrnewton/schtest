@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::env::VarError;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -1049,6 +1049,318 @@ pub fn launch_lat_cap_workers(
     Ok(LatCapWorkersHandle {
         workers,
         stop_signal,
+    })
+}
+
+/// Handle for ping-pong latency probe workers
+pub struct PingPongProbeHandle {
+    probe_a: Child,
+    probe_b: Child,
+    stop_signal: SharedBox<AtomicU32>,
+    /// Final CPU for probe A
+    pub final_cpu_a: SharedBox<AtomicI32>,
+    /// Final CPU for probe B
+    pub final_cpu_b: SharedBox<AtomicI32>,
+    /// Ping-pong iterations completed
+    pub iterations: SharedBox<AtomicU64>,
+}
+
+impl PingPongProbeHandle {
+    /// Stop the ping-pong probes and return final CPU locations
+    pub fn stop(self) -> Result<(i32, i32, u64)> {
+        self.stop_signal.store(1, Ordering::Release);
+        // Wake both threads one more time so they can see stop signal
+        std::thread::sleep(Duration::from_millis(100));
+        drop(self.probe_a);
+        drop(self.probe_b);
+        Ok((
+            self.final_cpu_a.load(Ordering::Acquire),
+            self.final_cpu_b.load(Ordering::Acquire),
+            self.iterations.load(Ordering::Acquire),
+        ))
+    }
+}
+
+/// Default ping-pong frequency (10 kHz = 100us between wakeups)
+pub const PING_PONG_HZ: u64 = 10_000;
+
+/// Launch ping-pong latency probe workers.
+///
+/// These workers wake each other in a tight loop, making them latency-critical
+/// in LAVD's eyes:
+/// - High wake_freq (woken frequently by each other)
+/// - Short avg_runtime (minimal work between wakes)
+/// - High normalized_lat_cri (above LAVD_LC_LATENCY_SENSITIVE_THRESH)
+///
+/// Both threads start pinned to initial_cpu, then unpin themselves.
+/// The scheduler should migrate them to the CPU with best lat_capacity.
+pub fn launch_ping_pong_probes(
+    allocator: std::sync::Arc<BumpAllocator>,
+    initial_cpu: &Hyperthread,
+    start_signal: SharedBox<AtomicU32>,
+    ping_pong_hz: u64,
+) -> Result<PingPongProbeHandle> {
+    let stop_signal = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+    let final_cpu_a = SharedBox::new(allocator.clone(), AtomicI32::new(-1))?;
+    let final_cpu_b = SharedBox::new(allocator.clone(), AtomicI32::new(-1))?;
+    let iterations = SharedBox::new(allocator.clone(), AtomicU64::new(0))?;
+
+    // Shared futex words for ping-pong communication
+    let futex_a = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+    let futex_b = SharedBox::new(allocator.clone(), AtomicU32::new(0))?;
+
+    let initial_mask = CPUMask::new(initial_cpu);
+    let interval_ns = 1_000_000_000 / ping_pong_hz;
+
+    // Probe A: waits on futex_a, wakes futex_b
+    let probe_a_start = start_signal.clone();
+    let probe_a_stop = stop_signal.clone();
+    let probe_a_futex_wait = futex_a.clone();
+    let probe_a_futex_wake = futex_b.clone();
+    let probe_a_final_cpu = final_cpu_a.clone();
+    let probe_a_iterations = iterations.clone();
+    let probe_a_mask = initial_mask.clone();
+
+    let probe_a = Child::run(
+        move || {
+            probe_a_mask.run(|| {
+                // Set thread name for tracing
+                unsafe {
+                    let name = std::ffi::CString::new("probe_a").unwrap();
+                    libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+                }
+
+                // Wait for start signal
+                while probe_a_start.load(Ordering::Acquire) == 0 {
+                    std::hint::spin_loop();
+                }
+
+                // Unpin ourselves
+                unsafe {
+                    let mut mask: libc::cpu_set_t = std::mem::zeroed();
+                    for i in 0..libc::CPU_SETSIZE as usize {
+                        libc::CPU_SET(i, &mut mask);
+                    }
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mask);
+                }
+
+                let wait_ptr = probe_a_futex_wait.as_ptr() as *mut u32;
+                let wake_ptr = probe_a_futex_wake.as_ptr() as *mut u32;
+                let mut local_iter = 0u64;
+
+                // Kick off the ping-pong by waking B first
+                probe_a_futex_wake.fetch_add(1, Ordering::Release);
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_futex,
+                        wake_ptr,
+                        libc::FUTEX_WAKE,
+                        1i32,
+                        std::ptr::null::<libc::timespec>(),
+                        std::ptr::null::<u32>(),
+                        0u32,
+                    );
+                }
+
+                loop {
+                    if probe_a_stop.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+
+                    // Wait on our futex
+                    let futex_val = probe_a_futex_wait.load(Ordering::Acquire);
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex,
+                            wait_ptr,
+                            libc::FUTEX_WAIT,
+                            futex_val,
+                            std::ptr::null::<libc::timespec>(),
+                            std::ptr::null::<u32>(),
+                            0u32,
+                        );
+                    }
+
+                    if probe_a_stop.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+
+                    // Brief spin to simulate minimal work and control frequency
+                    let spin_until = std::time::Instant::now()
+                        + Duration::from_nanos(interval_ns / 2);
+                    while std::time::Instant::now() < spin_until {
+                        std::hint::spin_loop();
+                    }
+
+                    // Wake the other thread
+                    probe_a_futex_wake.fetch_add(1, Ordering::Release);
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex,
+                            wake_ptr,
+                            libc::FUTEX_WAKE,
+                            1i32,
+                            std::ptr::null::<libc::timespec>(),
+                            std::ptr::null::<u32>(),
+                            0u32,
+                        );
+                    }
+
+                    local_iter += 1;
+                    if local_iter % 1000 == 0 {
+                        probe_a_iterations.store(local_iter * 2, Ordering::Release);
+                    }
+                }
+
+                // Record final CPU
+                let cpu = unsafe { libc::sched_getcpu() };
+                probe_a_final_cpu.store(cpu, Ordering::Release);
+                probe_a_iterations.store(local_iter * 2, Ordering::Release);
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
+
+    // Probe B: waits on futex_b, wakes futex_a
+    let probe_b_start = start_signal.clone();
+    let probe_b_stop = stop_signal.clone();
+    let probe_b_futex_wait = futex_b.clone();
+    let probe_b_futex_wake = futex_a.clone();
+    let probe_b_final_cpu = final_cpu_b.clone();
+    let probe_b_mask = initial_mask.clone();
+
+    let probe_b = Child::run(
+        move || {
+            probe_b_mask.run(|| {
+                // Set thread name for tracing
+                unsafe {
+                    let name = std::ffi::CString::new("probe_b").unwrap();
+                    libc::prctl(libc::PR_SET_NAME, name.as_ptr());
+                }
+
+                // Wait for start signal
+                while probe_b_start.load(Ordering::Acquire) == 0 {
+                    std::hint::spin_loop();
+                }
+
+                // Unpin ourselves
+                unsafe {
+                    let mut mask: libc::cpu_set_t = std::mem::zeroed();
+                    for i in 0..libc::CPU_SETSIZE as usize {
+                        libc::CPU_SET(i, &mut mask);
+                    }
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mask);
+                }
+
+                let wait_ptr = probe_b_futex_wait.as_ptr() as *mut u32;
+                let wake_ptr = probe_b_futex_wake.as_ptr() as *mut u32;
+
+                loop {
+                    if probe_b_stop.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+
+                    // Wait on our futex
+                    let futex_val = probe_b_futex_wait.load(Ordering::Acquire);
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex,
+                            wait_ptr,
+                            libc::FUTEX_WAIT,
+                            futex_val,
+                            std::ptr::null::<libc::timespec>(),
+                            std::ptr::null::<u32>(),
+                            0u32,
+                        );
+                    }
+
+                    if probe_b_stop.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+
+                    // Brief spin to simulate minimal work and control frequency
+                    let spin_until = std::time::Instant::now()
+                        + Duration::from_nanos(interval_ns / 2);
+                    while std::time::Instant::now() < spin_until {
+                        std::hint::spin_loop();
+                    }
+
+                    // Wake the other thread
+                    probe_b_futex_wake.fetch_add(1, Ordering::Release);
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex,
+                            wake_ptr,
+                            libc::FUTEX_WAKE,
+                            1i32,
+                            std::ptr::null::<libc::timespec>(),
+                            std::ptr::null::<u32>(),
+                            0u32,
+                        );
+                    }
+                }
+
+                // Record final CPU
+                let cpu = unsafe { libc::sched_getcpu() };
+                probe_b_final_cpu.store(cpu, Ordering::Release);
+            })?;
+            Ok(())
+        },
+        None,
+    )?;
+
+    // Spawn a helper thread to wake both probes when stop signal is set
+    let stop_signal_clone = stop_signal.clone();
+    let futex_a_clone = futex_a.clone();
+    let futex_b_clone = futex_b.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if stop_signal_clone.load(Ordering::Acquire) != 0 {
+                // Wake both probes so they can exit
+                futex_a_clone.fetch_add(1, Ordering::Release);
+                futex_b_clone.fetch_add(1, Ordering::Release);
+                unsafe {
+                    let ptr_a = futex_a_clone.as_ptr() as *mut u32;
+                    let ptr_b = futex_b_clone.as_ptr() as *mut u32;
+                    libc::syscall(
+                        libc::SYS_futex,
+                        ptr_a,
+                        libc::FUTEX_WAKE,
+                        1i32,
+                        std::ptr::null::<libc::timespec>(),
+                        std::ptr::null::<u32>(),
+                        0u32,
+                    );
+                    libc::syscall(
+                        libc::SYS_futex,
+                        ptr_b,
+                        libc::FUTEX_WAKE,
+                        1i32,
+                        std::ptr::null::<libc::timespec>(),
+                        std::ptr::null::<u32>(),
+                        0u32,
+                    );
+                }
+                break;
+            }
+        }
+    });
+
+    eprintln!(
+        "Launched ping-pong latency probes at {} Hz ({}us between wakeups)",
+        ping_pong_hz,
+        1_000_000 / ping_pong_hz
+    );
+
+    Ok(PingPongProbeHandle {
+        probe_a,
+        probe_b,
+        stop_signal,
+        final_cpu_a,
+        final_cpu_b,
+        iterations,
     })
 }
 
