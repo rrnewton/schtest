@@ -156,6 +156,22 @@ class LavdMonitor:
         except Exception as e:
             print(f"Monitor thread error: {e}")
 
+    def get_sample_count(self) -> int:
+        """Get total number of samples collected across all CPUs."""
+        with self.lock:
+            return sum(stats.count for stats in self.lat_cap_stats.values())
+
+    def wait_for_samples(self, min_samples: int = 1, timeout: float = 10.0) -> bool:
+        """Wait until we have at least min_samples, returns True if successful."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.get_sample_count() >= min_samples:
+                return True
+            if self.process and self.process.poll() is not None:
+                return False  # Process died
+            time.sleep(0.1)
+        return False
+
     def start(self):
         """Start the LAVD monitor process."""
         cmd = [
@@ -176,14 +192,15 @@ class LavdMonitor:
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
 
-        # Give it a moment to start
-        time.sleep(0.5)
+        # Wait for monitor to start producing samples
+        if not self.wait_for_samples(min_samples=1, timeout=10.0):
+            if self.process.poll() is not None:
+                stderr = self.process.stderr.read()
+                raise RuntimeError(f"LAVD monitor exited prematurely: {stderr}")
+            raise RuntimeError("LAVD monitor started but no samples received within 10s")
 
-        if self.process.poll() is not None:
-            stderr = self.process.stderr.read()
-            raise RuntimeError(f"LAVD monitor exited prematurely: {stderr}")
-
-        print(f"  LAVD monitor running (PID {self.process.pid})")
+        sample_count = self.get_sample_count()
+        print(f"  LAVD monitor running (PID {self.process.pid}), {sample_count} initial samples")
 
     def stop(self) -> dict[int, LatCapStats]:
         """Stop the monitor and return collected stats."""
