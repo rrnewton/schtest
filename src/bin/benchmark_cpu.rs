@@ -3,7 +3,6 @@
 //! This delegates to the benchmark implementation in the library.
 
 use clap::Parser;
-use libc;
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, ForkResult};
 use rand::Rng;
@@ -119,8 +118,9 @@ fn run_with_cgroup(cpu_pct: u64, duration: Duration, verbose: bool) {
             }
 
             // Now run the benchmark until shutdown flag set
+            // SAFETY: shutdown_flag points to valid shared memory that remains valid until process exit
             let results =
-                spinner_utilization::run_spinner_with_shutdown(shutdown_flag, tsc_hz, verbose);
+                unsafe { spinner_utilization::run_spinner_with_shutdown(shutdown_flag, tsc_hz, verbose) };
 
             // Output JSON to stdout
             println!("{}", serde_json::to_string_pretty(&results).unwrap());

@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::test;
 use crate::util::stats::Distribution;
 use crate::util::system::{CPUMask, CPUSet, System};
 use crate::workloads::benchmark::converge;

@@ -145,7 +145,7 @@ pub struct InterruptDelta {
 }
 
 /// Different methods for generating IRQ load on the victim CPU
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IrqDisruptionMode {
     /// No IRQ disruption - baseline measurement
     None,
@@ -154,15 +154,10 @@ pub enum IrqDisruptionMode {
     /// Use perf_event_open to generate PMI (Performance Monitoring Interrupt) sampling
     Pmu,
     /// Use timerfd for high-frequency timer interrupts
+    #[default]
     Timer,
     /// Use all methods simultaneously for maximum IRQ pressure
     Combined,
-}
-
-impl Default for IrqDisruptionMode {
-    fn default() -> Self {
-        IrqDisruptionMode::Timer
-    }
 }
 
 /// Unified handle for any IRQ disruption strategy
@@ -403,7 +398,7 @@ pub fn launch_futex_ipi_disruption(
                     wakeups_sent += 1;
 
                     // Record count every 1000 wakeups to avoid overhead
-                    if wakeups_sent % 1000 == 0 {
+                    if wakeups_sent.is_multiple_of(1000) {
                         waker_count_shared.store(wakeups_sent, Ordering::Release);
                     }
                 }
@@ -527,7 +522,7 @@ pub fn launch_timer_irq_disruption(
                 for i in 0..NUM_TIMERS {
                     let signo = libc::SIGRTMIN() + i as i32;
                     let sa = libc::sigaction {
-                        sa_sigaction: timer_signal_handler as usize,
+                        sa_sigaction: timer_signal_handler as *const () as usize,
                         sa_mask: unsafe { std::mem::zeroed() },
                         sa_flags: libc::SA_RESTART,
                         sa_restorer: None,
@@ -1213,7 +1208,7 @@ pub fn launch_ping_pong_probes(
                     }
 
                     local_iter += 1;
-                    if local_iter % 1000 == 0 {
+                    if local_iter.is_multiple_of(1000) {
                         probe_a_iterations.store(local_iter * 2, Ordering::Release);
                     }
                 }
@@ -1435,10 +1430,7 @@ impl SpinnerProbeHandle {
         // Copy transitions from shared memory
         let count = self.transition_log.count.load(Ordering::Acquire) as usize;
         let count = count.min(MAX_CPU_TRANSITIONS);
-        let transitions: Vec<CpuTransition> = self.transition_log.entries[..count]
-            .iter()
-            .copied()
-            .collect();
+        let transitions: Vec<CpuTransition> = self.transition_log.entries[..count].to_vec();
 
         Ok((final_cpu, iterations, transitions))
     }
@@ -1545,7 +1537,7 @@ pub fn launch_spinner_probe(
                     }
 
                     local_iter += 1;
-                    if local_iter % 1000 == 0 {
+                    if local_iter.is_multiple_of(1000) {
                         probe_iterations.store(local_iter, Ordering::Release);
                     }
                 }
@@ -1572,6 +1564,7 @@ pub fn launch_spinner_probe(
 }
 
 /// Helper function to launch a CPU hog and add it to a cgroup
+#[allow(clippy::too_many_arguments)]
 pub fn launch_cgroup_hog(
     _cpu_id: i32,
     cpu_ht: &Hyperthread,

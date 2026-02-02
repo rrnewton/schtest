@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::test;
 use crate::util::stats::Distribution;
 use crate::util::system::CPUMask;
 use crate::util::system::{CPUSet, System};

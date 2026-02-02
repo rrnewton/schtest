@@ -1,6 +1,5 @@
 //! Tests for cgroup tree creation and resource management.
 
-use crate::test;
 use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::workloads::cgroup_tree::{ActualizedCGroupTree, CGroupTreeNode, SystemConstraints};
 use anyhow::Result;

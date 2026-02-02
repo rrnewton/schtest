@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::test;
 use crate::util::system::{CPUSet, System};
 use crate::workloads::context::Context;
 use crate::workloads::semaphore::Semaphore;

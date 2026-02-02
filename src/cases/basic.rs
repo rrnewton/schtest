@@ -10,10 +10,8 @@ use crate::workloads::benchmark::BenchResult::{Count, Latency};
 use crate::workloads::spinner::Spinner;
 use crate::workloads::{context::Context, semaphore::Semaphore};
 
-use crate::benchmark;
 use crate::measure;
 use crate::process;
-use crate::test;
 
 use anyhow::Result;
 

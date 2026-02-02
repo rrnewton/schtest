@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::test;
 use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::System;
 
@@ -46,7 +45,7 @@ fn irq_migration_test() -> Result<()> {
     let system = System::load()?;
 
     // Collect all physical cores (we'll victimize all but one)
-    let cores: Vec<_> = system.cores().into_iter().collect();
+    let cores: Vec<_> = system.cores().iter().collect();
     if cores.len() < 2 {
         anyhow::bail!("Need at least 2 physical cores for this test");
     }
@@ -220,7 +219,7 @@ fn irq_migration_test() -> Result<()> {
     if transitions.is_empty() {
         eprintln!("  No CPU transitions detected (probe stayed on CPU {})", initial_victim_cpu_id);
     } else {
-        eprintln!("{:>12} {:>12} {:>8} {:>8}  {}", "Iteration", "Elapsed", "From", "To", "Note");
+        eprintln!("{:>12} {:>12} {:>8} {:>8}  Note", "Iteration", "Elapsed", "From", "To");
         for t in &transitions {
             let elapsed_ms = t.elapsed_ns as f64 / 1_000_000.0;
             let note = if control_cpu_ids.contains(&t.to_cpu) {
@@ -252,7 +251,7 @@ fn irq_migration_test() -> Result<()> {
     }
 
     eprintln!("\n=== CPU Residence Time ===");
-    eprintln!("{:>6} {:>12} {:>8}  {}", "CPU", "Time", "Percent", "Role");
+    eprintln!("{:>6} {:>12} {:>8}  Role", "CPU", "Time", "Percent");
     eprintln!("{}", "-".repeat(45));
     let mut cpu_times: Vec<_> = cpu_time.into_iter().collect();
     cpu_times.sort_by(|(_, a), (_, b)| b.cmp(a));  // Sort by time descending
@@ -261,7 +260,7 @@ fn irq_migration_test() -> Result<()> {
         let pct = *time_ns as f64 / test_duration_ns as f64 * 100.0;
         let role = if control_cpu_ids.contains(cpu) {
             "CONTROL"
-        } else if victim_cpu_ids.contains(&(*cpu as i32)) {
+        } else if victim_cpu_ids.contains(cpu) {
             "VICTIM"
         } else {
             ""
@@ -290,8 +289,8 @@ fn irq_migration_test() -> Result<()> {
     // Print interrupt summary for key CPUs
     eprintln!("\n=== Interrupt Counts (Delta) ===");
     eprintln!(
-        "{:>6} {:>15} {:>15}  {}",
-        "CPU", "Total", "Reschedule", "Role"
+        "{:>6} {:>15} {:>15}  Role",
+        "CPU", "Total", "Reschedule"
     );
 
     // Show initial victim, final CPU, and control

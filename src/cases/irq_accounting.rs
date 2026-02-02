@@ -19,7 +19,6 @@ use anyhow::{Context, Result};
 use cgroups_rs::fs::cgroup_builder::CgroupBuilder;
 use cgroups_rs::fs::hierarchies;
 
-use crate::test;
 use crate::util::shared::{BumpAllocator, SharedBox};
 use crate::util::system::System;
 
